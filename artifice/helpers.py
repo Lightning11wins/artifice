@@ -1,0 +1,110 @@
+"""File tools that run inside the sandbox, so they see the same filesystem as shell commands.
+
+Usage: helpers.py TOOL JSON_ARGS
+"""
+import json
+import os
+import stat
+import sys
+
+MAX_LINE = 2000
+MAX_CHARS = 30000
+MAX_ENTRIES = 500
+BINARY_PROBE = 8192
+
+
+def read_file(path: str, offset: int = 1, limit: int = 2000) -> str:
+	st = os.stat(path)
+	if stat.S_ISDIR(st.st_mode):
+		return f"Error: {path} is a directory. Use list_directory."
+	if not stat.S_ISREG(st.st_mode):
+		return f"Error: {path} is not a regular file ({_kind(st.st_mode)}). Use run_shell_command if you need it."
+	with open(path, "rb") as f:
+		probe = f.read(BINARY_PROBE)
+	if b"\0" in probe:
+		return (f"Error: {path} looks binary ({st.st_size} bytes). "
+			"Use run_shell_command with file, strings, xxd or pdftotext.")
+	if st.st_size == 0:
+		return f"({path} is empty)"
+
+	offset = max(1, offset)
+	limit = max(1, limit)
+	out: list[str] = []
+	chars = 0
+	last = offset - 1
+	total = 0
+	with open(path, encoding="utf-8", errors="replace", newline=None) as f:
+		for number, line in enumerate(f, 1):
+			total = number
+			if number < offset or number >= offset + limit or chars >= MAX_CHARS:
+				continue
+			line = line.rstrip("\n")
+			if len(line) > MAX_LINE:
+				line = line[:MAX_LINE] + f" [... line truncated, {len(line)} chars]"
+			out.append(f"{number:>6}\t{line}")
+			chars += len(line) + 8
+			last = number
+	if offset > total:
+		return f"Error: offset {offset} is past the end of {path} ({total} lines)."
+	if last < total:
+		out.append(f"[Showed lines {offset}-{last} of {total}. Use offset={last + 1} to read more.]")
+	return "\n".join(out)
+
+
+def list_directory(path: str) -> str:
+	entries = []
+	with os.scandir(path) as it:
+		for entry in it:
+			try:
+				st = entry.stat(follow_symlinks=False)
+			except OSError:
+				entries.append((2, entry.name, f"? {entry.name}"))
+				continue
+			if stat.S_ISDIR(st.st_mode):
+				entries.append((0, entry.name, f"{entry.name}/"))
+			elif stat.S_ISLNK(st.st_mode):
+				try:
+					target = os.readlink(entry.path)
+				except OSError:
+					target = "?"
+				entries.append((1, entry.name, f"{entry.name} -> {target}"))
+			elif stat.S_ISREG(st.st_mode):
+				entries.append((1, entry.name, f"{entry.name}  ({_size(st.st_size)})"))
+			else:
+				entries.append((1, entry.name, f"{entry.name}  ({_kind(st.st_mode)})"))
+	if not entries:
+		return f"({path} is empty)"
+	entries.sort(key=lambda e: (e[0], e[1].lower()))
+	lines = [e[2] for e in entries[:MAX_ENTRIES]]
+	if len(entries) > MAX_ENTRIES:
+		lines.append(f"[{len(entries) - MAX_ENTRIES} more entries not shown. Use glob or run_shell_command to filter.]")
+	return "\n".join(lines)
+
+
+def _kind(mode: int) -> str:
+	for test, name in ((stat.S_ISFIFO, "FIFO"), (stat.S_ISSOCK, "socket"), (stat.S_ISCHR, "character device"),
+			(stat.S_ISBLK, "block device")):
+		if test(mode):
+			return name
+	return "special file"
+
+
+def _size(n: int) -> str:
+	for unit in ("B", "KB", "MB", "GB"):
+		if n < 1024 or unit == "GB":
+			return f"{n} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+		n /= 1024
+	return str(n)
+
+
+def main() -> None:
+	tool, args = sys.argv[1], json.loads(sys.argv[2])
+	try:
+		print(globals()[tool](**args))
+	except OSError as e:
+		print(f"Error: {e.strerror}: {e.filename}")
+		sys.exit(1)
+
+
+if __name__ == "__main__":
+	main()
