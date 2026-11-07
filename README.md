@@ -14,7 +14,9 @@ bin/artifice -p "question"            # one-shot: answer to stdout, trace to std
 
 The server address comes from `--host`/`--port`, else `$LLM_HOST`/`$LLM_PORT`, else `localhost:8741`. Type `/help` in a chat for commands.
 
-Needs Python 3.12+, `bwrap` (package `bubblewrap`) and, optionally, `rg` (package `ripgrep`). Artifice offers to install missing ones with `apt` or `dnf`. On systems where AppArmor restricts unprivileged user namespaces, it offers to install a profile that allows them for bwrap.
+Needs Python 3.12+, `sudo`, `setpriv` (util-linux), `bwrap` (package `bubblewrap`) and, optionally, `rg` (package `ripgrep`). Artifice offers to install missing ones with `apt` or `dnf`.
+
+Artifice asks for your sudo password once per session (when sudo's ticket expires, it asks again), because the sandbox starts as root to grant the model read access to every file. See below.
 
 ## Tools
 
@@ -30,16 +32,25 @@ Each tool call runs in its own sandbox. Output over 30,000 characters is cut dow
 
 ## Sandbox
 
-Every tool call runs as `systemd-run --user --scope` (memory and task limits, when available) → `bwrap` → `confine.py` → the command.
+Every tool call runs as `systemd-run --user --scope` (memory and task limits, when available), then `sudo bwrap`, then `setpriv`, then `confine.py`, then the command.
 
-- **bwrap:** read-only bind of `/` at the same paths, a private `/dev` and `/proc`, and new user, PID, network, IPC, UTS and cgroup namespaces. So there is no network and other processes are invisible. `/tmp` is the chat's scratch directory, `~/.local/share/artifice/scratch/<chat>`, which is writable and persists for the chat. Files older than 48 hours are deleted at startup.
-- **confine.py** closes what a read-only mount leaves open:
-  - Landlock allows writes only under `/tmp` and the private `/dev`, which blocks writing into FIFOs on the host filesystem.
-  - seccomp blocks `socket(AF_UNIX)`, which would otherwise reach dbus, ssh-agent and gpg-agent through socket files. It also blocks io_uring, `open_by_handle_at` and the keyring syscalls.
+- **sudo bwrap** starts as root without a user namespace, so the capability it keeps is real on the host. It makes:
+  - a read-only bind of `/` at the same paths;
+  - a private `/dev`;
+  - the host's `/proc`, read-only, so the model sees every process;
+  - new PID, network, IPC, UTS and cgroup namespaces. So there is no network, and PIDs passed to `kill` or `ptrace` resolve in the sandbox, not on the host.
+
+  `/tmp` is the chat's scratch directory, `~/.local/share/artifice/scratch/<chat>`. It is writable and persists for the chat. Files older than 48 hours are deleted at startup.
+
+  The command to run reaches the sandbox on stdin, so sudo logs only the fixed sandbox command line, not what the model ran.
+- **setpriv** drops to your uid, gid and groups and keeps only `CAP_DAC_READ_SEARCH`. That capability lets the model read every file, root-only ones included, and nothing else.
+- **confine.py** closes what a read-only mount and that capability leave open:
+  - Landlock allows writes only under `/tmp` and the private `/dev`, which blocks writing into FIFOs on the host filesystem. Its ptrace scoping also hides `/proc/PID/environ`, `fd` and `maps` of host processes.
+  - seccomp blocks `socket(AF_UNIX)`, which would otherwise reach dbus, ssh-agent and gpg-agent through socket files. It blocks `open_by_handle_at`, which with the capability opens files by handle, past the sandbox's mounts. It also blocks io_uring and the keyring syscalls.
   - `no_new_privs` stops sudo and setuid binaries.
 - Limits: 120 s default timeout (600 s max), 1 GiB per written file, 1 MiB of output kept per command.
 
-The escape tests in `tests/test_sandbox.py` try each of these and must all fail to change anything:
+The escape tests in `tests/test_sandbox.py` try each of these and must all fail to change anything. They need sudo without a password prompt, so run `sudo -v` first, and run them outside any other sandbox:
 
 ```bash
 python3 -m unittest discover -s tests -v
