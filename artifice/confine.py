@@ -1,0 +1,172 @@
+"""Confines this process with Landlock and seccomp, then execs a command.
+
+Runs inside the bwrap sandbox, closing the gaps a read-only bind mount leaves open:
+FIFOs on the host filesystem stay writable, and so do unix sockets (dbus, ssh-agent, ...).
+
+Usage: confine.py [--write DIR]... [--fsize BYTES] -- COMMAND [ARG]...
+"""
+import ctypes
+import os
+import platform
+import resource
+import struct
+import sys
+
+libc = ctypes.CDLL(None, use_errno=True)
+libc.syscall.restype = ctypes.c_long
+libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+
+PR_SET_SECCOMP = 22
+PR_SET_NO_NEW_PRIVS = 38
+SECCOMP_MODE_FILTER = 2
+
+# Landlock syscall numbers are shared by x86_64 and aarch64.
+SYS_LANDLOCK_CREATE_RULESET = 444
+SYS_LANDLOCK_ADD_RULE = 445
+SYS_LANDLOCK_RESTRICT_SELF = 446
+LANDLOCK_CREATE_RULESET_VERSION = 1
+LANDLOCK_RULE_PATH_BENEATH = 1
+
+# Landlock filesystem rights that modify something, by the ABI version that introduced them.
+FS_WRITE_FILE = 1 << 1
+FS_REMOVE_DIR = 1 << 4
+FS_REMOVE_FILE = 1 << 5
+FS_MAKE_CHAR = 1 << 6
+FS_MAKE_DIR = 1 << 7
+FS_MAKE_REG = 1 << 8
+FS_MAKE_SOCK = 1 << 9
+FS_MAKE_FIFO = 1 << 10
+FS_MAKE_BLOCK = 1 << 11
+FS_MAKE_SYM = 1 << 12
+FS_REFER = 1 << 13
+FS_TRUNCATE = 1 << 14
+WRITE_RIGHTS_V1 = (FS_WRITE_FILE | FS_REMOVE_DIR | FS_REMOVE_FILE | FS_MAKE_CHAR | FS_MAKE_DIR
+	| FS_MAKE_REG | FS_MAKE_SOCK | FS_MAKE_FIFO | FS_MAKE_BLOCK | FS_MAKE_SYM)
+
+# Seccomp: per-architecture audit value and syscall numbers.
+ARCHES = {
+	"x86_64": {"audit": 0xC000003E, "socket": 41, "open_by_handle_at": 304, "add_key": 248, "request_key": 249,
+		"keyctl": 250},
+	"aarch64": {"audit": 0xC00000B7, "socket": 198, "open_by_handle_at": 265, "add_key": 217, "request_key": 218,
+		"keyctl": 219},
+}
+IO_URING_SYSCALLS = (425, 426, 427)  # setup, enter, register; io_uring can open sockets past seccomp
+X32_SYSCALL_BIT = 0x40000000
+AF_UNIX = 1
+
+BPF_LD_W_ABS = 0x20
+BPF_JEQ_K = 0x15
+BPF_JGE_K = 0x35
+BPF_RET_K = 0x06
+SECCOMP_RET_KILL_PROCESS = 0x80000000
+SECCOMP_RET_ERRNO = 0x00050000
+SECCOMP_RET_ALLOW = 0x7FFF0000
+EPERM = 1
+EACCES = 13
+
+
+class SockFprog(ctypes.Structure):
+	_fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.c_char_p)]
+
+
+def fail(message: str) -> None:
+	print(f"artifice-confine: {message}", file=sys.stderr)
+	sys.exit(125)
+
+
+def landlock(write_dirs: list[str]) -> None:
+	abi = libc.syscall(SYS_LANDLOCK_CREATE_RULESET, None, 0, LANDLOCK_CREATE_RULESET_VERSION)
+	if abi < 1:
+		fail(f"Failed to enable Landlock (errno {ctypes.get_errno()}); it must be in the kernel's lsm= list")
+	rights = WRITE_RIGHTS_V1
+	if abi >= 2:
+		rights |= FS_REFER
+	if abi >= 3:
+		rights |= FS_TRUNCATE
+
+	# Only write rights are handled, so reads and execution stay unrestricted.
+	attr = struct.pack("Q", rights)
+	ruleset = libc.syscall(SYS_LANDLOCK_CREATE_RULESET, attr, len(attr), 0)
+	if ruleset < 0:
+		fail(f"Failed to create Landlock ruleset (errno {ctypes.get_errno()})")
+	for path in write_dirs:
+		fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
+		rule = struct.pack("=Qi", rights, fd)
+		if libc.syscall(SYS_LANDLOCK_ADD_RULE, ruleset, LANDLOCK_RULE_PATH_BENEATH, rule, 0) != 0:
+			fail(f"Failed to add Landlock rule for {path} (errno {ctypes.get_errno()})")
+		os.close(fd)
+	if libc.syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset, 0) != 0:
+		fail(f"Failed to apply Landlock ruleset (errno {ctypes.get_errno()})")
+	os.close(ruleset)
+
+
+def seccomp_program(arch: dict[str, int]) -> bytes:
+	def stmt(code: int, k: int) -> bytes:
+		return struct.pack("=HBBI", code, 0, 0, k)
+
+	def jump(code: int, k: int, jt: int, jf: int) -> bytes:
+		return struct.pack("=HBBI", code, jt, jf, k)
+
+	errno = lambda e: SECCOMP_RET_ERRNO | e
+	prog = [
+		stmt(BPF_LD_W_ABS, 4),  # seccomp_data.arch
+		jump(BPF_JEQ_K, arch["audit"], 1, 0),
+		stmt(BPF_RET_K, SECCOMP_RET_KILL_PROCESS),
+		stmt(BPF_LD_W_ABS, 0),  # seccomp_data.nr
+	]
+	if arch["audit"] == ARCHES["x86_64"]["audit"]:
+		prog += [jump(BPF_JGE_K, X32_SYSCALL_BIT, 0, 1), stmt(BPF_RET_K, SECCOMP_RET_KILL_PROCESS)]
+	# open_by_handle_at opens files outside the sandbox's mounts when CAP_DAC_READ_SEARCH is held.
+	denied = (*IO_URING_SYSCALLS, arch["open_by_handle_at"], arch["add_key"], arch["request_key"], arch["keyctl"])
+	for nr in denied:
+		prog += [jump(BPF_JEQ_K, nr, 0, 1), stmt(BPF_RET_K, errno(EPERM))]
+	prog += [
+		jump(BPF_JEQ_K, arch["socket"], 0, 3),
+		stmt(BPF_LD_W_ABS, 16),  # low word of seccomp_data.args[0], the address family
+		jump(BPF_JEQ_K, AF_UNIX, 0, 1),
+		stmt(BPF_RET_K, errno(EACCES)),
+		stmt(BPF_RET_K, SECCOMP_RET_ALLOW),
+	]
+	return b"".join(prog)
+
+
+def seccomp() -> None:
+	machine = platform.machine()
+	if machine not in ARCHES:
+		fail(f"Failed to build seccomp filter: unsupported architecture {machine}")
+	code = seccomp_program(ARCHES[machine])
+	prog = SockFprog(len(code) // 8, code)
+	if libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ctypes.addressof(prog), 0, 0) != 0:
+		fail(f"Failed to apply seccomp filter (errno {ctypes.get_errno()})")
+
+
+def main() -> None:
+	args = sys.argv[1:]
+	write_dirs: list[str] = []
+	fsize = resource.RLIM_INFINITY
+	while args and args[0] != "--":
+		flag, value, args = args[0], args[1], args[2:]
+		if flag == "--write":
+			write_dirs.append(value)
+		elif flag == "--fsize":
+			fsize = int(value)
+		else:
+			fail(f"Failed to parse arguments: unknown flag {flag}")
+	command = args[1:]
+	if not command:
+		fail("Failed to parse arguments: no command after --")
+
+	resource.setrlimit(resource.RLIMIT_FSIZE, (fsize, fsize))
+	if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+		fail(f"Failed to set no_new_privs (errno {ctypes.get_errno()})")
+	landlock(write_dirs)
+	seccomp()
+	try:
+		os.execvp(command[0], command)
+	except OSError as e:
+		print(f"Failed to run {command[0]}: {e.strerror}", file=sys.stderr)
+		sys.exit(127)
+
+
+if __name__ == "__main__":
+	main()
