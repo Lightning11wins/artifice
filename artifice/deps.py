@@ -9,17 +9,6 @@ from pathlib import Path
 REQUIRED = {"bwrap": {"apt": "bubblewrap", "dnf": "bubblewrap"}}
 OPTIONAL = {"rg": {"apt": "ripgrep", "dnf": "ripgrep"}}
 
-APPARMOR_PROFILE_PATH = "/etc/apparmor.d/artifice-bwrap"
-APPARMOR_PROFILE = """abi <abi/4.0>,
-include <tunables/global>
-
-# Lets bwrap create the user namespaces artifice sandboxes tools in.
-profile artifice-bwrap /usr/bin/bwrap flags=(unconfined) {
-  userns,
-  include if exists <local/artifice-bwrap>
-}
-"""
-
 
 def _manager() -> str | None:
 	for name, cmd in (("apt", "apt-get"), ("dnf", "dnf")):
@@ -79,15 +68,3 @@ def ensure(state_path: Path, recheck: bool = False) -> bool:
 	state_path.write_text(json.dumps(state))
 	return ok
 
-
-def offer_apparmor_fix() -> bool:
-	"""Offers to install an AppArmor profile that lets bwrap create user namespaces."""
-	print("AppArmor restricts unprivileged user namespaces, which bwrap needs. This profile allows them for bwrap:\n")
-	print(APPARMOR_PROFILE)
-	if not _ask(f"Install it to {APPARMOR_PROFILE_PATH} with sudo and load it?"):
-		return False
-	tee = subprocess.run(["sudo", "tee", APPARMOR_PROFILE_PATH], input=APPARMOR_PROFILE.encode(),
-		stdout=subprocess.DEVNULL)
-	if tee.returncode != 0:
-		return False
-	return subprocess.run(["sudo", "apparmor_parser", "-r", APPARMOR_PROFILE_PATH]).returncode == 0

@@ -97,18 +97,6 @@ def parse_args() -> argparse.Namespace:
 	return p.parse_args()
 
 
-def start_sandbox(chat: Chat) -> Sandbox:
-	sandbox = Sandbox(READ_ONLY, scratch_root() / chat.id, chat.cwd)
-	try:
-		sandbox.check()
-	except SandboxError as e:
-		if "AppArmor" in str(e) and deps.offer_apparmor_fix():
-			sandbox.check()
-		else:
-			raise
-	return sandbox
-
-
 def read_input() -> str | None:
 	try:
 		line = input("\n\001\033[1;32m\002>\001\033[0m\002 " if sys.stdout.isatty() else "\n> ")
@@ -153,7 +141,8 @@ class App:
 		if self.args.model is None:
 			self.settings.model = chat.model
 		chat.model = self.settings.model
-		sandbox = start_sandbox(chat)
+		sandbox = Sandbox(READ_ONLY, scratch_root() / chat.id, chat.cwd, notify=self.ui.notice)
+		sandbox.check()
 		self.agent = Agent(self.client, chat, Tools(sandbox), self.settings, self.ui, self.context_length)
 
 	def new_chat(self) -> Chat:
@@ -229,8 +218,11 @@ class App:
 				if not line.strip():
 					continue
 				if line.startswith("/"):
-					if not self.command(line.strip()):
-						break
+					try:
+						if not self.command(line.strip()):
+							break
+					except SandboxError as e:
+						self.ui.notice(str(e))
 					continue
 				self.turn(line)
 		finally:

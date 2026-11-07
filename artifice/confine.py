@@ -3,9 +3,12 @@
 Runs inside the bwrap sandbox, closing the gaps a read-only bind mount leaves open:
 FIFOs on the host filesystem stay writable, and so do unix sockets (dbus, ssh-agent, ...).
 
-Usage: confine.py [--write DIR]... [--fsize BYTES] -- COMMAND [ARG]...
+Usage: confine.py [--write DIR]... [--fsize BYTES] (--argv-stdin | -- COMMAND [ARG]...)
+
+--argv-stdin reads the command as a JSON list from stdin, then gives it /dev/null as stdin.
 """
 import ctypes
+import json
 import os
 import platform
 import resource
@@ -144,7 +147,11 @@ def main() -> None:
 	args = sys.argv[1:]
 	write_dirs: list[str] = []
 	fsize = resource.RLIM_INFINITY
+	argv_stdin = False
 	while args and args[0] != "--":
+		if args[0] == "--argv-stdin":
+			argv_stdin, args = True, args[1:]
+			continue
 		flag, value, args = args[0], args[1], args[2:]
 		if flag == "--write":
 			write_dirs.append(value)
@@ -152,9 +159,15 @@ def main() -> None:
 			fsize = int(value)
 		else:
 			fail(f"Failed to parse arguments: unknown flag {flag}")
-	command = args[1:]
-	if not command:
-		fail("Failed to parse arguments: no command after --")
+	if argv_stdin:
+		command = json.loads(sys.stdin.read())
+		devnull = os.open(os.devnull, os.O_RDONLY)
+		os.dup2(devnull, 0)
+		os.close(devnull)
+	else:
+		command = args[1:]
+	if not command or not all(isinstance(a, str) for a in command):
+		fail(f"Failed to parse arguments: bad command {command!r}")
 
 	resource.setrlimit(resource.RLIMIT_FSIZE, (fsize, fsize))
 	if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:

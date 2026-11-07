@@ -5,7 +5,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from .sandbox import Result, Sandbox
+from .sandbox import Result, Sandbox, SandboxError
 
 HELPERS = str(Path(__file__).with_name("helpers.py"))
 OUTPUT_MAX_CHARS = 30000
@@ -93,6 +93,8 @@ class Tools:
 			result = method(**args)
 		except (TypeError, ValueError) as e:
 			return ToolResult(f"Error: bad arguments for {name}: {e}", True)
+		except SandboxError as e:
+			return ToolResult(f"Error: {e}", True)
 		result.text = _truncate(result.text)
 		return result
 
