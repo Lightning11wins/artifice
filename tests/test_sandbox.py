@@ -1,8 +1,11 @@
 """Escape tests for the read-only sandbox. Every attempt to change the host must fail.
 
-Run with: python3 -m unittest discover -s tests -v   (needs working bwrap, so not inside another sandbox)
+Run with: python3 -m unittest discover -s tests -v
+Needs sudo without a password prompt (run `sudo -v` first), and cannot run inside another sandbox.
 """
+import ctypes
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -29,6 +32,13 @@ class SandboxEscapeTest(unittest.TestCase):
 		cls.sb = Sandbox(READ_ONLY, cls.scratch, str(cls.host))
 		cls.sb.check()
 		(cls.host / "file").write_text("original\n")
+		cls.root_file = HOST_DIR / f"root-only-{os.getpid()}"
+		subprocess.run(["sudo", "-n", "sh", "-c", f"umask 077; echo root-secret > {cls.root_file}"], check=True)
+
+	@classmethod
+	def tearDownClass(cls):
+		subprocess.run(["sudo", "-n", "rm", "-f", str(cls.root_file)], check=True)
+		shutil.rmtree(HOST_DIR)
 
 	def sh(self, command: str, timeout: int = 20):
 		return self.sb.run(["bash", "-c", command], timeout=timeout)
@@ -44,6 +54,52 @@ class SandboxEscapeTest(unittest.TestCase):
 		r = self.sh(f"cat {self.host}/file && head -c 10 /etc/os-release")
 		self.assertEqual(r.exit_code, 0, r.output)
 		self.assertIn("original", r.output)
+
+	def test_reads_root_only_files(self):
+		self.assertNotEqual(subprocess.run(["cat", str(self.root_file)], capture_output=True).returncode, 0)
+		r = self.sh(f"cat {self.root_file}")
+		self.assertEqual(r.output.strip(), "root-secret")
+		r = self.sh(f"echo x > {self.root_file}")
+		self.assertNotEqual(r.exit_code, 0, r.output)
+
+	def test_runs_as_user_with_only_dac_read_search(self):
+		r = self.sh("id -u; grep -E '^Cap(Inh|Prm|Eff|Bnd|Amb)' /proc/self/status")
+		lines = r.output.split("\n")
+		self.assertEqual(lines[0], str(os.getuid()), r.output)
+		for line in lines[1:6]:
+			self.assertEqual(int(line.split()[1], 16), 1 << 2, r.output)  # CAP_DAC_READ_SEARCH
+
+	def test_open_by_handle_at_escape(self):
+		# With CAP_DAC_READ_SEARCH, a handle opened through the writable /tmp mount would bypass the read-only one.
+		r = self.py(f"""
+import ctypes, os
+libc = ctypes.CDLL(None, use_errno=True)
+class Handle(ctypes.Structure):
+	_fields_ = [("size", ctypes.c_uint), ("type", ctypes.c_int), ("data", ctypes.c_ubyte * 128)]
+h = Handle(128)
+mount_id = ctypes.c_int()
+print("name", libc.name_to_handle_at(-100, b"{self.host}/file", ctypes.byref(h), ctypes.byref(mount_id), 0))
+mount_fd = os.open("/tmp", os.O_RDONLY | os.O_DIRECTORY)
+fd = libc.open_by_handle_at(mount_fd, ctypes.byref(h), os.O_RDWR)
+print("open", fd, ctypes.get_errno())
+if fd >= 0:
+	os.write(fd, b"pwned")
+""")
+		self.assertIn("name 0", r.output)
+		self.assertIn("open -1 1", r.output)
+		self.assertUnchanged()
+
+	def test_linkat_empty_path_escape(self):
+		# CAP_DAC_READ_SEARCH also allows linking an open file into /tmp, where Landlock allows writes.
+		r = self.py(f"""
+import ctypes, os
+libc = ctypes.CDLL(None, use_errno=True)
+fd = os.open("{self.host}/file", os.O_RDONLY)
+print("link", libc.linkat(fd, b"", -100, b"/tmp/linked", 0x1000), ctypes.get_errno())
+open("/tmp/linked", "w").write("pwned")
+""")
+		self.assertIn("link -1", r.output)
+		self.assertUnchanged()
 
 	def test_write_create_delete_rename_fail(self):
 		for cmd in [
@@ -146,15 +202,29 @@ class SandboxEscapeTest(unittest.TestCase):
 		r = self.sh("cat /proc/net/dev")
 		self.assertNotRegex(r.output, r"\n\s*(eth|en|wl|virbr)", r.output)
 
-	def test_host_processes_invisible_and_unsignalable(self):
+	def test_host_processes_visible_but_untouchable(self):
 		victim = subprocess.Popen(["sleep", "60"])
+		pid = victim.pid
+		oom_before = Path(f"/proc/{pid}/oom_score_adj").read_text()
 		try:
-			r = self.sh(f"ls /proc | grep -E '^[0-9]+$' | wc -l; kill -9 {victim.pid}")
-			self.assertLess(int(r.output.split()[0]), 10, r.output)
+			r = self.sh(f"ps -p {pid} -o comm=")
+			self.assertEqual(r.output.strip(), "sleep", r.output)
+			for cmd in [
+				f"kill -9 {pid}",
+				f"renice -n 19 -p {pid}",
+				f"echo 1000 > /proc/{pid}/oom_score_adj",
+				f"python3 -c \"open('/proc/{pid}/mem', 'r+b')\"",
+				f"cat /proc/{pid}/environ",
+				f"timeout 5 gdb -p {pid} -batch -ex 'call (int)kill(0, 9)'",
+			]:
+				with self.subTest(cmd=cmd):
+					self.assertNotEqual(self.sh(cmd).exit_code, 0)
 			time.sleep(0.2)
 			self.assertIsNone(victim.poll())
+			self.assertEqual(Path(f"/proc/{pid}/oom_score_adj").read_text(), oom_before)
 		finally:
 			victim.kill()
+			victim.wait()
 
 	def test_no_privilege_escalation(self):
 		r = self.sh("sudo -n true")
@@ -180,12 +250,15 @@ class SandboxEscapeTest(unittest.TestCase):
 
 	def test_timeout_and_background_processes(self):
 		start = time.monotonic()
-		r = self.sh("sleep 100", timeout=2)
+		r = self.sh("(sleep 4243 &); sleep 4244", timeout=2)
 		self.assertTrue(r.timed_out)
 		self.assertLess(time.monotonic() - start, 10)
-		r = self.sh("(sleep 100 &) ; echo started", timeout=10)
+		r = self.sh("(sleep 4245 &) ; echo started", timeout=10)
 		self.assertIn("started", r.output)
 		self.assertLess(time.monotonic() - start, 20)
+		time.sleep(0.5)
+		left = subprocess.run(["pgrep", "-f", "sleep 424[345]"], capture_output=True, text=True)
+		self.assertEqual(left.stdout, "")
 
 	def test_output_cap(self):
 		r = self.sh("yes | head -c 5000000")
