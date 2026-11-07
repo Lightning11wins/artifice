@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Chat data lives in ~/.local/share/artifice, never here; these catch a misplaced copy.
+chats/
+scratch/
+*.chat.json
+history
+
+# Secrets
+.env*
+*.pem
+*.key
+*.crt
+
+# Editor, agent and sandbox files
+.claude/
+.idea
+.vscode
+.mcp.json
+.bash_profile
+.bashrc
+.gitconfig
+.gitmodules
+.profile
+.ripgreprc
+.zprofile
+.zshrc
