@@ -446,6 +446,10 @@ Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(["sleep"
 				self.assertEqual(found, os.path.join(path, "tests/t.py") + ":1:needle")
 		self.assertEqual(tools.call("grep_search", json.dumps({"pattern": "needle", "path": "project/tests/t.py"})).text,
 			"project/tests/t.py:1:needle")
+		# Errors name files as rg would have without the cd. compact_memory is write-only, even for root.
+		errors = tools.call("grep_search", json.dumps({"pattern": "x", "path": "/proc/sys/vm"})).text
+		self.assertNotIn("rg: ./", errors)
+		self.assertIn("rg: /proc/sys/vm/compact_memory", errors)
 
 	def test_timeout_and_background_processes(self):
 		start = time.monotonic()

@@ -3,7 +3,9 @@
 Run with: python3 -m unittest discover -s tests -v
 """
 import argparse
+import json
 import os
+import signal
 import sys
 import tempfile
 import unittest
@@ -12,7 +14,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from artifice import cli, deps, helpers  # noqa: E402
+from artifice import cli, deps, helpers, tools  # noqa: E402
 from artifice.agent import Agent, Settings  # noqa: E402
 from artifice.client import LLMError  # noqa: E402
 from artifice.sandbox import READ_ONLY, Sandbox, SandboxError  # noqa: E402
@@ -195,6 +197,17 @@ class OpenChatTest(TempDataTest):
 		self.assertEqual(app.new_chat().cwd, str(Path.home()))
 
 
+class ToolsTest(unittest.TestCase):
+	def test_non_string_path_is_a_tool_error(self):
+		with mock.patch.object(tools.shutil, "which", return_value="/usr/bin/rg"):
+			t = tools.Tools(mock.Mock())
+		for path in (5, ["a"], True):
+			with self.subTest(path=path):
+				result = t.call("glob", json.dumps({"pattern": "*.py", "path": path}))
+				self.assertTrue(result.error)
+				self.assertIn("path must be a string", result.text)
+
+
 class CommandTest(TempDataTest):
 	def test_paths_are_messages(self):
 		self.assertTrue(cli.is_command("/resume 2026"))
@@ -215,6 +228,13 @@ class CommandTest(TempDataTest):
 			self.assertEqual(cli.read_input(), "Here is the log:\nline 1")
 		with mock.patch("builtins.input", side_effect=['"""one line"""']):
 			self.assertEqual(cli.read_input(), "one line")
+
+	def test_nohup_is_kept(self):
+		old = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+		self.addCleanup(signal.signal, signal.SIGHUP, old)
+		self.addCleanup(signal.signal, signal.SIGTERM, signal.getsignal(signal.SIGTERM))
+		cli.exit_on_sigterm()
+		self.assertEqual(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
 
 	def test_sampling_arguments_are_validated(self):
 		for flag, value in (("--temperature", "0"), ("--top-p", "0"), ("--top-p", "1.5")):

@@ -134,7 +134,8 @@ def is_command(line: str) -> bool:
 def exit_on_sigterm() -> None:
 	"""Turns SIGTERM and SIGHUP into SystemExit, so cleanup code runs and kills the sandbox's running command."""
 	for signum in (signal.SIGTERM, signal.SIGHUP):
-		signal.signal(signum, lambda signum, frame: sys.exit(128 + signum))
+		if signal.getsignal(signum) != signal.SIG_IGN:  # keeps nohup working
+			signal.signal(signum, lambda signum, frame: sys.exit(128 + signum))
 
 
 def read_input() -> str | None:

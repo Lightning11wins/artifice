@@ -12,12 +12,16 @@ OUTPUT_MAX_CHARS = 30000
 OUTPUT_TAIL_CHARS = 8000
 SCRATCH_WARN_BYTES = 2 << 30
 # Runs rg inside a directory given as $1, since rg matches globs relative to its working directory.
-# Output paths get $2 as a prefix, so they read as if rg had searched $1. A file in $1 is searched directly.
+# Paths in its output and errors get $2 as a prefix, so they read as if rg had searched $1. A file in $1 is
+# searched directly.
 RG_IN_DIR = (
 	'dir=$1 prefix=$2; shift 2; '
 	'if [ ! -d "$dir" ]; then exec "$@" -- "$dir"; fi; '
 	'cd -- "$dir" || exit 2; set -o pipefail; '
-	'"$@" -- . | prefix="$prefix" awk \'$0 == "--" { print; next } { sub(/^\\.\\//, ""); print ENVIRON["prefix"] $0 }\''
+	'"$@" -- . 2>&1 | prefix="$prefix" awk \''
+	'sub(/^\\.\\//, "") { print ENVIRON["prefix"] $0; next } '
+	'sub(/^rg: \\.\\//, "") { print "rg: " ENVIRON["prefix"] $0; next } '
+	'{ print }\''
 )
 SCRATCH_FULL = ("/tmp is past its size or file count limit, or holds a directory you made unreadable "
 	"or nested too deeply to measure. Delete files you no longer need, or chmod u+rwx the directory.")
@@ -106,8 +110,13 @@ class Tools:
 		except ValueError as e:
 			return ToolResult(f"Error: arguments for {name} are not a valid JSON object ({e}): {arguments}", True)
 		method = getattr(self, f"_{name}", None)
-		if name not in {s["function"]["name"] for s in self.schemas} or method is None:
+		schema = next((s["function"] for s in self.schemas if s["function"]["name"] == name), None)
+		if schema is None or method is None:
 			return ToolResult(f"Error: unknown tool {name}", True)
+		properties = schema["parameters"]["properties"]
+		for key, value in args.items():
+			if properties.get(key, {}).get("type") == "string" and not isinstance(value, str):
+				return ToolResult(f"Error: bad arguments for {name}: {key} must be a string, not {value!r}", True)
 		try:
 			result = method(**args)
 		except (TypeError, ValueError, OverflowError) as e:
