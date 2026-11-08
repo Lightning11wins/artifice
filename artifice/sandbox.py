@@ -67,6 +67,7 @@ class Sandbox:
 		self.bwrap = shutil.which("bwrap") or "bwrap"
 		self.setpriv = shutil.which("setpriv") or "setpriv"
 		self.unshare = shutil.which("unshare") or "unshare"
+		self.timeout = shutil.which("timeout") or "timeout"
 		self._systemd = shutil.which("systemd-run") is not None and os.path.isdir("/run/systemd/system")
 		self._passwordless = False
 		self._lock = self._lock_scratch(exclusive)
@@ -101,7 +102,7 @@ class Sandbox:
 			os.close(fd)  # clean_scratch removed it before the lock was taken
 		raise SandboxError(f"Failed to lock scratch directory {self.scratch}")
 
-	def command(self, deadline: int = 0) -> list[str]:
+	def command(self, deadline: int) -> list[str]:
 		"""The sandbox command line. The command to run goes on stdin, which keeps it out of sudo's logs."""
 		home = os.path.expanduser("~")
 		env = {
@@ -118,7 +119,9 @@ class Sandbox:
 			"XDG_CACHE_HOME": "/tmp/.cache",
 			"PYTHONDONTWRITEBYTECODE": "1",
 		}
-		cmd = ["sudo", "-n"]
+		# timeout runs as root outside the sandbox, so it ends the sandbox even if Artifice was killed.
+		# It dies with sudo, and bwrap dies with it through --die-with-parent.
+		cmd = ["sudo", "-n", self.setpriv, "--pdeathsig", "KILL", self.timeout, "--foreground", "-s", "KILL", str(deadline)]
 		if self._systemd:
 			# A system scope, because sudo's PAM session can move it out of a user scope.
 			cmd += [
@@ -160,8 +163,6 @@ class Sandbox:
 		# confine.py enters cwd as the user, who can enter FUSE mounts that root cannot.
 		cmd += [sys.executable, "-I", "-S", CONFINE, "--chdir", cwd, "--write", "/tmp", "--write", "/dev"]
 		cmd += ["--fsize", str(self.profile.file_size_max), "--argv-stdin"]
-		if deadline:
-			cmd += ["--deadline", str(deadline)]
 		return cmd
 
 	def ensure_sudo(self) -> None:
@@ -185,7 +186,7 @@ class Sandbox:
 		A sandbox that fails after sudo let it run still counts, so check() reports the real error.
 		"""
 		try:
-			r = subprocess.run(self.command(), input=b'["true"]', capture_output=True, timeout=30)
+			r = subprocess.run(self.command(30), input=b'["true"]', capture_output=True, timeout=30)
 		except subprocess.TimeoutExpired:
 			return False
 		return r.returncode == 0 or not r.stderr.startswith(b"sudo:")
@@ -235,7 +236,7 @@ class Sandbox:
 		finally:
 			sel.close()
 			if proc.poll() is None:
-				# Killing sudo kills bwrap through --die-with-parent, and with it the PID namespace.
+				# Killing sudo kills timeout, then bwrap, and with it the PID namespace.
 				try:
 					os.kill(proc.pid, signal.SIGKILL)
 				except ProcessLookupError:
@@ -252,7 +253,8 @@ class Sandbox:
 
 	def check(self) -> None:
 		"""Raises SandboxError with a diagnosis when the sandbox cannot start."""
-		for tool, package in (("bwrap", "bubblewrap"), ("setpriv", "util-linux"), ("unshare", "util-linux"), ("sudo", "sudo")):
+		for tool, package in (("bwrap", "bubblewrap"), ("setpriv", "util-linux"), ("unshare", "util-linux"),
+				("timeout", "coreutils"), ("sudo", "sudo")):
 			if not shutil.which(tool):
 				raise SandboxError(f"Failed to find {tool} (package: {package})")
 		for path in (sys.executable, CONFINE):
@@ -264,7 +266,8 @@ class Sandbox:
 		if result.exit_code != 0:
 			hint = ""
 			if os.path.isdir("/sys/kernel/security/apparmor"):
-				hint = " If AppArmor confines bwrap (check `sudo aa-status | grep bwrap`), that profile may block it."
+				hint = (" If AppArmor confines bwrap or unshare (check `sudo aa-status | grep -E 'bwrap|unshare'`), "
+					"that profile may block it.")
 			raise SandboxError(f"Failed to start sandbox (exit {result.exit_code}): {result.output.strip()}{hint}")
 
 	def scratch_full(self) -> bool:

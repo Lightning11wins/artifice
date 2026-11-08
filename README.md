@@ -14,7 +14,7 @@ bin/artifice -p "question"            # one-shot: answer to stdout, trace to std
 
 The server address comes from `--host`/`--port`, else `$LLM_HOST`/`$LLM_PORT`, else `localhost:8741`. Type `/help` in a chat for commands.
 
-Needs Python 3.12+, `sudo`, `setpriv` and `unshare` (util-linux), `bwrap` (package `bubblewrap`) and, optionally, `rg` (package `ripgrep`). Artifice offers to install `bwrap` and `rg` with `apt` or `dnf` when they are missing.
+Needs Python 3.12+, `sudo`, `timeout` (coreutils), `setpriv` and `unshare` (util-linux), `bwrap` (package `bubblewrap`) and, optionally, `rg` (package `ripgrep`). Artifice offers to install `bwrap` and `rg` with `apt` or `dnf` when they are missing.
 
 Artifice asks for your sudo password once per session (when sudo's ticket expires, it asks again), because the sandbox starts as root to grant the model read access to every file. See below.
 
@@ -32,7 +32,7 @@ Each tool call runs in its own sandbox. Output over 30,000 characters is cut dow
 
 ## Sandbox
 
-Every tool call runs as `sudo`, then `systemd-run --scope` (memory and task limits, when systemd runs), then `bwrap`, then `unshare`, then `setpriv`, then `confine.py`, then the command.
+Every tool call runs as `sudo`, then `timeout` (a backstop that kills the sandbox 10 s after the command's timeout), then `systemd-run --scope` (memory and task limits, when systemd runs), then `bwrap`, then `unshare`, then `setpriv`, then `confine.py`, then the command.
 
 - **sudo bwrap** starts as root without a user namespace, so the capability it keeps is real on the host. It makes:
   - a read-only bind of `/` at the same paths;
@@ -50,8 +50,8 @@ Every tool call runs as `sudo`, then `systemd-run --scope` (memory and task limi
   - seccomp allows only IPv4, IPv6 and netlink sockets, which the network namespace confines. That blocks unix sockets, which would otherwise reach dbus, ssh-agent and gpg-agent through socket files, and families like vsock and Bluetooth that ignore network namespaces. It blocks `open_by_handle_at`, which with the capability opens files by handle, past the sandbox's mounts. It also blocks io_uring and the keyring syscalls.
   - `no_new_privs` stops sudo and setuid binaries.
 - Limits: 120 s default timeout (600 s max; if Artifice itself is killed, the sandbox ends 10 s after the timeout), 8 GiB of memory without swap and 512 tasks, 1 GiB per written file, 1 GiB in `/dev/shm`, 4 GiB and 100,000 entries in scratch, 1 MiB of output kept per command.
-- Scratch limits are checked every second while a command runs and when it exits, and a directory Artifice cannot read counts as full. A command that finishes within a second can overshoot them; while scratch is over, later commands are killed after a second until the model deletes files. A hard cap would need a disk quota or a dedicated filesystem.
-- Reading still has effects that a read-only sandbox cannot stop. Reading a FIFO takes data meant for its reader, reading `/sys/kernel/tracing/trace_pipe` drains the kernel trace buffer, and a lock taken on a read-only file, such as dpkg's or rpm's lock, makes host programs wait for it until the command ends or times out.
+- Scratch limits are checked every second while a command runs and when it exits, and a directory Artifice cannot read counts as full. A command can overshoot them by what it writes in a second; while scratch is over, later commands are killed after a second until the model deletes files. A hard cap would need a disk quota or a dedicated filesystem.
+- Reading still has effects that a read-only sandbox cannot stop. Reading a FIFO takes data meant for its reader, reading `/sys/kernel/tracing/trace_pipe` drains the kernel trace buffer, and a lock taken on a read-only file, such as dpkg's or rpm's lock, makes host programs wait for it until the command ends or times out. Reading an automount point mounts it on the host, though that first read fails in the sandbox, whose mounts are private. A command that crashes reaches the host's crash reporter, if one is set up.
 
 The escape tests in `tests/test_sandbox.py` try each of these and must all fail to change anything. `tests/test_app.py` covers the agent loop and CLI with a fake server. The escape tests need sudo without a password prompt, so run `sudo -v` first, and run them outside any other sandbox:
 

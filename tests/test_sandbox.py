@@ -363,7 +363,9 @@ import sys
 sys.path.insert(0, {str(root)!r})
 from pathlib import Path
 from artifice.sandbox import READ_ONLY, Sandbox
-Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(["sleep", "4283"], timeout=2)
+# Stopping its parent must not keep the command alive.
+Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(
+	["bash", "-c", "kill -STOP $PPID 2>/dev/null; exec sleep 4283"], timeout=2)
 """
 		parent = subprocess.Popen([sys.executable, "-I", "-c", code])
 		time.sleep(1.5)
@@ -380,8 +382,10 @@ Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(["sleep"
 	def test_file_size_limit_and_default_signals(self):
 		sb = Sandbox(Profile(name="small", file_size_max=1 << 20), self.scratch, str(self.host))
 		r = sb.run(["bash", "-c", "head -c 2M /dev/zero > /tmp/big; echo $?; stat -c %s /tmp/big; rm /tmp/big; "
-			"yes | head -1 > /dev/null; echo ${PIPESTATUS[0]}"])
-		self.assertRegex(r.output, r"(?m)^153\n1048576\n141$")
+			"yes | head -1 > /dev/null; echo ${PIPESTATUS[0]}; "
+			": > /tmp/kept; fallocate -n -l 10M /tmp/kept 2>/dev/null; echo $?; du -k /tmp/kept; rm /tmp/kept"])
+		# fallocate --keep-size skips RLIMIT_FSIZE in the kernel, so seccomp refuses it.
+		self.assertRegex(r.output, r"(?m)^153\n1048576\n141\n1\n0\t/tmp/kept$")
 
 	def test_host_mounts_made_during_a_command_stay_out(self):
 		# Landlock does not cover chmod, chown, utime or xattrs, so a writable host mount must not appear.
@@ -433,7 +437,7 @@ Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(["sleep"
 		# A NOPASSWD rule must cover the whole sandbox command, not just bwrap.
 		sb = Sandbox(READ_ONLY, self.scratch, str(self.host))
 		probe = Path(tempfile.mkdtemp(dir=HOST_DIR)) / "probed"
-		sb.command = lambda: ["sh", "-c", f"touch {probe}; echo 'sudo: a password is required' >&2; exit 1"]
+		sb.command = lambda deadline: ["sh", "-c", f"touch {probe}; echo 'sudo: a password is required' >&2; exit 1"]
 		with mock.patch.object(artifice.sandbox, "_quiet", lambda argv: False), \
 				mock.patch.object(sys.stdin, "isatty", lambda: False):
 			with self.assertRaisesRegex(SandboxError, "needs a password"):
@@ -443,10 +447,10 @@ Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(["sleep"
 
 	def test_sandbox_failure_after_sudo_is_not_a_password_error(self):
 		sb = Sandbox(READ_ONLY, self.scratch, str(self.host))
-		sb.setpriv = "/nonexistent/setpriv"
+		sb.unshare = "/nonexistent/unshare"
 		with mock.patch.object(artifice.sandbox, "_quiet", lambda argv: False), \
 				mock.patch.object(sys.stdin, "isatty", lambda: False):
-			with self.assertRaisesRegex(SandboxError, "Failed to start sandbox.*setpriv"):
+			with self.assertRaisesRegex(SandboxError, "Failed to start sandbox.*unshare"):
 				sb.check()
 
 	def test_cwd_under_host_tmp_or_dev(self):

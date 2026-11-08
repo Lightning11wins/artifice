@@ -51,23 +51,26 @@ WRITE_RIGHTS_V1 = (FS_WRITE_FILE | FS_REMOVE_DIR | FS_REMOVE_FILE | FS_MAKE_CHAR
 # Seccomp: per-architecture audit value and syscall numbers.
 ARCHES = {
 	"x86_64": {"audit": 0xC000003E, "socket": 41, "open_by_handle_at": 304, "add_key": 248, "request_key": 249,
-		"keyctl": 250},
+		"keyctl": 250, "fallocate": 285},
 	"aarch64": {"audit": 0xC00000B7, "socket": 198, "open_by_handle_at": 265, "add_key": 217, "request_key": 218,
-		"keyctl": 219},
+		"keyctl": 219, "fallocate": 47},
 }
 IO_URING_SYSCALLS = (425, 426, 427)  # setup, enter, register; io_uring can open sockets past seccomp
 X32_SYSCALL_BIT = 0x40000000
 ALLOWED_FAMILIES = (2, 10, 16)  # AF_INET, AF_INET6, AF_NETLINK; all confined by the network namespace
+FALLOC_FL_KEEP_SIZE = 0x01
 
 BPF_LD_W_ABS = 0x20
 BPF_JEQ_K = 0x15
 BPF_JGE_K = 0x35
+BPF_JSET_K = 0x45
 BPF_RET_K = 0x06
 SECCOMP_RET_KILL_PROCESS = 0x80000000
 SECCOMP_RET_ERRNO = 0x00050000
 SECCOMP_RET_ALLOW = 0x7FFF0000
 EACCES = 13
 ENOSYS = 38
+EOPNOTSUPP = 95
 
 
 class SockFprog(ctypes.Structure):
@@ -125,6 +128,14 @@ def seccomp_program(arch: dict[str, int]) -> bytes:
 	denied = (*IO_URING_SYSCALLS, arch["open_by_handle_at"], arch["add_key"], arch["request_key"], arch["keyctl"])
 	for nr in denied:
 		prog += [jump(BPF_JEQ_K, nr, 0, 1), stmt(BPF_RET_K, errno(ENOSYS))]
+	# The kernel skips RLIMIT_FSIZE for fallocate with KEEP_SIZE, which could fill the disk in one call.
+	prog += [
+		jump(BPF_JEQ_K, arch["fallocate"], 0, 4),
+		stmt(BPF_LD_W_ABS, 24),  # low word of seccomp_data.args[1], the mode
+		jump(BPF_JSET_K, FALLOC_FL_KEEP_SIZE, 0, 1),
+		stmt(BPF_RET_K, errno(EOPNOTSUPP)),
+		stmt(BPF_LD_W_ABS, 0),  # seccomp_data.nr again
+	]
 	families = len(ALLOWED_FAMILIES)
 	prog += [
 		jump(BPF_JEQ_K, arch["socket"], 0, families + 2),
@@ -154,7 +165,6 @@ def main() -> None:
 	write_dirs: list[str] = []
 	fsize = resource.RLIM_INFINITY
 	argv_stdin = False
-	deadline = 0
 	cwd = None
 	while args and args[0] != "--":
 		if args[0] == "--argv-stdin":
@@ -165,8 +175,6 @@ def main() -> None:
 			write_dirs.append(value)
 		elif flag == "--fsize":
 			fsize = int(value)
-		elif flag == "--deadline":
-			deadline = int(value)
 		elif flag == "--chdir":
 			cwd = value
 		else:
@@ -194,41 +202,12 @@ def main() -> None:
 	# Python ignores these at startup, and an exec would pass that on: `yes | head -1` would never get SIGPIPE.
 	for signum in (signal.SIGPIPE, signal.SIGXFSZ):
 		signal.signal(signum, signal.SIG_DFL)
-	if deadline:
-		supervise(deadline)
 	try:
 		os.execvp(command[0], command)
 	except OSError as e:
 		print(f"Failed to run {command[0]}: {e.strerror}", file=sys.stderr)
 		sys.exit(127)
 
-
-def supervise(deadline: int) -> None:
-	"""Returns in a child process, which runs the command. The parent exits after deadline seconds at most.
-
-	Artifice kills commands at their timeout, so this only matters when Artifice itself was killed. The parent is
-	bwrap's first process, so its exit ends the PID namespace and everything in it.
-	"""
-	pid = os.fork()
-	if pid == 0:
-		os.setpgid(0, 0)  # so the command's kill(0, ...) does not reach the supervisor
-		return
-	try:
-		os.setpgid(pid, pid)
-	except OSError:
-		pass  # the child got there first, or already exited
-	for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM):
-		signal.signal(signum, signal.SIG_IGN)
-
-	def expire(signum, frame):
-		os.kill(pid, signal.SIGKILL)
-		os._exit(128 + signal.SIGKILL)
-
-	signal.signal(signal.SIGALRM, expire)
-	signal.alarm(deadline)
-	_, status = os.waitpid(pid, 0)
-	code = os.waitstatus_to_exitcode(status)
-	sys.exit(code if code >= 0 else 128 - code)
 
 
 if __name__ == "__main__":
