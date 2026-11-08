@@ -148,22 +148,24 @@ def read_input() -> str | None:
 		return line
 	first = line.lstrip()[3:]
 	if "\n" in line:  # a bracketed paste, which can hold whole docstrings
-		head = first.split("\n", 1)[0].rstrip()
-		if head.endswith('"""'):
-			return line  # it opens with a one-line docstring
 		body, _, last = first.rpartition("\n")
 		if last.strip() == '"""':
 			return body
+		if line.count('"""') % 2 == 0:
+			return line  # pasted code that opens with a docstring
 	elif first.rstrip().endswith('"""'):
 		return first.rstrip()[:-3]
 	lines = [first] if first.strip() else []
 	while True:
 		try:
-			more = input("")
+			more = input("... ")
 		except EOFError:
 			break
 		# Terminals with bracketed paste deliver a paste as one line; others leave the rest of it waiting.
-		if more.strip() == '"""' and not _input_waiting():
+		body, _, last = more.rpartition("\n")
+		if last.strip() == '"""' and not _input_waiting():
+			if "\n" in more:
+				lines.append(body)
 			break
 		lines.append(more)
 	return "\n".join(lines)

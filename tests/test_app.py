@@ -387,6 +387,10 @@ class CommandTest(TempDataTest):
 			self.assertEqual(cli.read_input(), '"""Module."""\nimport os')
 		with mock.patch("builtins.input", side_effect=['"""Why?\nimport os\n"""']):
 			self.assertEqual(cli.read_input(), "Why?\nimport os")
+		with mock.patch("builtins.input", side_effect=['"""Doc.\n\nMore.\n"""\nimport os']):
+			self.assertEqual(cli.read_input(), '"""Doc.\n\nMore.\n"""\nimport os')
+		with mock.patch("builtins.input", side_effect=['"""Why?', 'code\nmore\n"""']):
+			self.assertEqual(cli.read_input(), "Why?\ncode\nmore")
 		with mock.patch("builtins.input", side_effect=['"""Why?', "if line.startswith('\"\"\"'):", '"""', "next"]):
 			self.assertEqual(cli.read_input(), "Why?\nif line.startswith('\"\"\"'):")
 
