@@ -375,7 +375,7 @@ class CommandTest(TempDataTest):
 			self.assertEqual(cli.read_input(), "Here is the log:\nline 1")
 		with mock.patch("builtins.input", side_effect=['"""one line"""']):
 			self.assertEqual(cli.read_input(), "one line")
-		pasted = ["def f():", '	"""Return x.', '	"""', "	return x"]
+		pasted = ['"""Module doc.', "", "More.", '"""', "def f():", '	"""Return x.', '	"""', "	return x"]
 		with mock.patch("builtins.input", side_effect=['"""Why does f fail?', *pasted, '"""']):
 			self.assertEqual(cli.read_input(), "\n".join(["Why does f fail?", *pasted]))
 
@@ -524,8 +524,12 @@ class GlobFallbackTest(unittest.TestCase):
 		with tempfile.TemporaryDirectory() as d:
 			for name in ("a.ts", "b.tsx", "c.js"):
 				Path(d, name).write_text("needle\n")
-			out = t.call("grep_search", json.dumps({"pattern": "needle", "path": d, "include": "*.{ts,t{sx,xt}}"})).text
-		self.assertEqual(sorted(line.split(":")[0] for line in out.splitlines()), [f"{d}/a.ts", f"{d}/b.tsx"])
+			Path(d, "sub").mkdir()
+			Path(d, "sub", "d.ts").write_text("needle\n")
+			out = t.call("grep_search", json.dumps({"pattern": "needle", "path": d, "include": "**/*.{ts,t{sx,xt}}"})).text
+			bad = t.call("grep_search", json.dumps({"pattern": "needle", "path": d, "include": "sub/*.ts"}))
+		self.assertEqual(sorted(line.split(":")[0] for line in out.splitlines()), [f"{d}/a.ts", f"{d}/b.tsx", f"{d}/sub/d.ts"])
+		self.assertTrue(bad.error, bad.text)
 
 	def test_schemas_without_rg_do_not_offer_gitignore(self):
 		from artifice.tools import schemas

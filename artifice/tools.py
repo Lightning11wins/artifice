@@ -1,5 +1,6 @@
 """Tool schemas for the model and their implementations, all run through the sandbox."""
 import json
+import re
 import shutil
 import sys
 from dataclasses import dataclass
@@ -180,7 +181,11 @@ class Tools:
 		else:
 			argv = ["grep", "-rnHE", "--line-buffered", "--binary-files=without-match", "--exclude-dir=.git"]
 			if include:
-				argv += [f"--include={p}" for p in expand_braces(include)]  # grep's --include has no braces
+				# grep's --include matches file names and has no braces.
+				names = [re.sub(r"^(\*\*/)+", "", p) for p in expand_braces(include)]
+				if any("/" in name for name in names):
+					return ToolResult(f"Error: include matches file names only without ripgrep: {include}", True)
+				argv += [f"--include={name}" for name in names]
 		if ignore_case:
 			argv.append("-i")
 		if context:
