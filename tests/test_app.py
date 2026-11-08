@@ -23,9 +23,10 @@ from artifice.tools import ToolResult  # noqa: E402
 class FakeClient:
 	"""Answers with tool_calls for the first `calls` turns, then text. Summary requests get notes."""
 
-	def __init__(self, calls: int = 0, usage: dict | None = None):
+	def __init__(self, calls: int = 0, usage: dict | None = None, stop: str = ""):
 		self.calls = calls
 		self.usage = usage
+		self.stop = stop
 		self.summaries = 0
 		self.max_tokens: list[int] = []
 
@@ -44,6 +45,8 @@ class FakeClient:
 			yield {"tool_calls": [call]}
 		else:
 			yield {"token": "done"}
+		if self.stop:
+			yield {"stop_reason": self.stop}
 
 	def load(self, model, ttl):
 		return {"context_length": 1000}
@@ -63,6 +66,12 @@ class FakeTools:
 
 
 class QuietUI:
+	def __init__(self):
+		self.notices: list[str] = []
+
+	def notice(self, text):
+		self.notices.append(text)
+
 	def __getattr__(self, name):
 		return lambda *args: None
 
@@ -116,6 +125,12 @@ class AgentTest(TempDataTest):
 		with self.assertRaises(SystemExit):
 			agent.send("go")
 		self.assertEqual(Chat.load(chat.id).messages[-1]["role"], "tool")
+
+	def test_max_tokens_notice_shows_the_limit_sent(self):
+		client = FakeClient(usage={"prompt_tokens": 20000, "completion_tokens": 6000}, stop="length")
+		ui = QuietUI()
+		Agent(client, self.chat(), FakeTools(), Settings(model="m"), ui, context_length=32768).send("hi")
+		self.assertIn(f"Response hit max_tokens ({client.max_tokens[0]})", " ".join(ui.notices))
 
 	def test_tool_output_larger_than_the_context_is_elided(self):
 		agent = Agent(FakeClient(calls=1), self.chat(), FakeTools(), Settings(model="m"), QuietUI(), context_length=8192)
@@ -208,8 +223,25 @@ class GlobFallbackTest(unittest.TestCase):
 			self.assertEqual(names("tests/*.py"), ["tests/b.py"])
 			self.assertEqual(names("*.py"), [".hidden/e.py", "a.py", "tests/b.py", "tests/deep/c.py"])
 			self.assertEqual(helpers.glob_files("*.rs", root), "No files matched.")
+			self.assertEqual(names("**/*.{py,txt}"), [".hidden/e.py", "a.py", "tests/b.py", "tests/deep/c.py", "tests/f.txt"])
+			self.assertEqual(names("{tests/deep,.hidden}/*.py"), [".hidden/e.py", "tests/deep/c.py"])
+			self.assertRegex(helpers.glob_files("[z-a]", root), "^Error: bad glob pattern")
 			(Path(root) / "tests" / "loop").symlink_to("..")
 			self.assertEqual(names("**/b.py"), ["tests/b.py"])
+
+	def test_schemas_without_rg_do_not_offer_gitignore(self):
+		from artifice.tools import schemas
+		text = str(schemas(False))
+		self.assertNotIn("gitignore", text)
+		self.assertNotIn("ripgrep", text)
+
+
+class ReadFileTest(unittest.TestCase):
+	def test_line_numbers_match_grep(self):
+		with tempfile.NamedTemporaryFile("wb") as f:
+			f.write(b"p 10%\rp 100%\nERROR\r\n")
+			f.flush()
+			self.assertIn("     2\tERROR\n", helpers.read_file(f.name) + "\n")
 
 
 class DepsTest(TempDataTest):

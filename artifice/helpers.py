@@ -31,12 +31,13 @@ def read_file(path: str, offset: int = 1, limit: int = 2000) -> str:
 	chars = 0
 	last = offset - 1
 	total = 0
-	with open(path, encoding="utf-8", errors="replace", newline=None) as f:
+	# Only \n ends a line, as in grep, rg and sed.
+	with open(path, encoding="utf-8", errors="replace", newline="\n") as f:
 		for number, line in enumerate(f, 1):
 			total = number
 			if number < offset or number >= offset + limit or chars >= MAX_CHARS:
 				continue
-			line = line.rstrip("\n")
+			line = line.removesuffix("\n").removesuffix("\r")
 			if len(line) > MAX_LINE:
 				line = line[:MAX_LINE] + f" [... line truncated, {len(line)} chars]"
 			out.append(f"{number:>6}\t{line}")
@@ -83,9 +84,12 @@ def list_directory(path: str) -> str:
 
 def glob_files(pattern: str, path: str) -> str:
 	"""Files under path matching pattern, skipping .git. The fallback for glob when rg is missing."""
-	if "/" not in pattern:
-		pattern = f"**/{pattern}"  # like rg, a pattern without a slash matches at any depth
-	regex = _glob_regex(pattern.removeprefix("./"))
+	# Like rg, a pattern without a slash matches at any depth.
+	full = pattern.removeprefix("./") if "/" in pattern else f"**/{pattern}"
+	try:
+		regex = _glob_regex(full)
+	except re.error as e:
+		return f"Error: bad glob pattern {pattern}: {e}"
 	matches = []
 	for root, dirs, files in os.walk(path):  # does not follow symlinked directories
 		dirs[:] = [d for d in dirs if d != ".git"]
@@ -97,7 +101,11 @@ def glob_files(pattern: str, path: str) -> str:
 
 
 def _glob_regex(pattern: str) -> re.Pattern:
-	"""Compiles a glob where ** spans directories and *, ? and [...] stay within one."""
+	"""Compiles a glob where ** spans directories, *, ? and [...] stay within one, and {a,b} picks one."""
+	return re.compile(_glob_body(pattern) + r"\Z")
+
+
+def _glob_body(pattern: str) -> str:
 	out = []
 	i = 0
 	while i < len(pattern):
@@ -114,13 +122,36 @@ def _glob_regex(pattern: str) -> re.Pattern:
 			out.append("[^/]")
 			i += 1
 		elif pattern[i] == "[" and (end := pattern.find("]", i + 2)) != -1:
-			body = pattern[i + 1:end].replace("\\", "\\\\")
-			out.append("[" + ("^" + body[1:] if body[0] == "!" else body) + "]")
+			body = pattern[i + 1:end]
+			negate = body[0] in "!^"
+			body = "".join(c if c == "-" else re.escape(c) for c in body[negate:])
+			out.append("[" + ("^" if negate else "") + body + "]")
 			i = end + 1
+		elif pattern[i] == "{" and (alternatives := _brace_alternatives(pattern, i)):
+			options, i = alternatives
+			out.append("(?:" + "|".join(_glob_body(option) for option in options) + ")")
 		else:
 			out.append(re.escape(pattern[i]))
 			i += 1
-	return re.compile("".join(out) + r"\Z")
+	return "".join(out)
+
+
+def _brace_alternatives(pattern: str, start: int) -> tuple[list[str], int] | None:
+	"""Splits {a,b,...} at start into its options and returns them with the index after }."""
+	depth = 0
+	options = []
+	begin = start + 1
+	for i in range(start, len(pattern)):
+		if pattern[i] == "{":
+			depth += 1
+		elif pattern[i] == "}":
+			depth -= 1
+			if depth == 0:
+				return options + [pattern[begin:i]], i + 1
+		elif pattern[i] == "," and depth == 1:
+			options.append(pattern[begin:i])
+			begin = i + 1
+	return None
 
 
 def _kind(mode: int) -> str:

@@ -23,50 +23,59 @@ def _schema(name: str, description: str, properties: dict, required: list[str]) 
 	}}
 
 
-SCHEMAS = [
-	_schema("read_file",
-		"Read a text file. Returns numbered lines. Reads up to 2000 lines from offset; "
-		"use offset and limit to page through large files.",
-		{
-			"path": {"type": "string", "description": "Absolute path, or relative to the working directory"},
-			"offset": {"type": "integer", "description": "First line to read, starting at 1"},
-			"limit": {"type": "integer", "description": "Number of lines to read"},
-		},
-		["path"]),
-	_schema("list_directory",
-		"List a directory's entries with sizes. Directories end with /.",
-		{"path": {"type": "string", "description": "Directory path; defaults to the working directory"}},
-		[]),
-	_schema("glob",
-		"Find files by glob pattern, such as '**/*.py' or 'src/**/test_*.js'. "
-		"Skips .git and files ignored by .gitignore unless include_ignored is true.",
-		{
-			"pattern": {"type": "string", "description": "Glob pattern, relative to path"},
-			"path": {"type": "string", "description": "Directory to search; defaults to the working directory"},
-			"include_ignored": {"type": "boolean", "description": "Also list files ignored by .gitignore"},
-		},
-		["pattern"]),
-	_schema("grep_search",
-		"Search file contents with a regular expression (ripgrep syntax). Returns path:line:text matches. "
-		"Skips .git, binary files, and files ignored by .gitignore unless include_ignored is true.",
-		{
-			"pattern": {"type": "string", "description": "Regular expression to search for"},
-			"path": {"type": "string", "description": "File or directory to search; defaults to the working directory"},
-			"include": {"type": "string", "description": "Only search files matching this glob, such as '*.py'"},
-			"ignore_case": {"type": "boolean", "description": "Case-insensitive search"},
-			"context": {"type": "integer", "description": "Lines of context to show around each match"},
-			"include_ignored": {"type": "boolean", "description": "Also search files ignored by .gitignore"},
-		},
-		["pattern"]),
-	_schema("run_shell_command",
-		"Run a bash command and return its combined stdout and stderr. Each call starts a fresh shell "
-		"in the working directory. The filesystem is read-only except /tmp, and there is no network.",
-		{
-			"command": {"type": "string", "description": "The bash command to run"},
-			"timeout": {"type": "integer", "description": "Seconds before the command is killed (default 120, max 600)"},
-		},
-		["command"]),
-]
+def schemas(rg: bool) -> list[dict]:
+	"""Tool schemas. Without rg, the fallbacks do not read .gitignore and grep uses grep -E syntax."""
+	ignored = "files ignored by .gitignore unless include_ignored is true"
+
+	def include_ignored(verb: str) -> dict:
+		return {"include_ignored": {"type": "boolean", "description": f"Also {verb} files ignored by .gitignore"}} if rg else {}
+
+	return [
+		_schema("read_file",
+			"Read a text file. Returns numbered lines. Reads up to 2000 lines from offset; "
+			"use offset and limit to page through large files.",
+			{
+				"path": {"type": "string", "description": "Absolute path, or relative to the working directory"},
+				"offset": {"type": "integer", "description": "First line to read, starting at 1"},
+				"limit": {"type": "integer", "description": "Number of lines to read"},
+			},
+			["path"]),
+		_schema("list_directory",
+			"List a directory's entries with sizes. Directories end with /.",
+			{"path": {"type": "string", "description": "Directory path; defaults to the working directory"}},
+			[]),
+		_schema("glob",
+			"Find files by glob pattern, such as '**/*.py' or 'src/**/test_*.js'. "
+			+ (f"Skips .git and {ignored}." if rg else "Skips .git."),
+			{
+				"pattern": {"type": "string", "description": "Glob pattern, relative to path"},
+				"path": {"type": "string", "description": "Directory to search; defaults to the working directory"},
+				**include_ignored("list"),
+			},
+			["pattern"]),
+		_schema("grep_search",
+			f"Search file contents with a regular expression ({'ripgrep' if rg else 'grep -E'} syntax). "
+			"Returns path:line:text matches. "
+			+ (f"Skips .git, binary files, and {ignored}." if rg else "Skips .git and binary files."),
+			{
+				"pattern": {"type": "string", "description": "Regular expression to search for"},
+				"path": {"type": "string", "description": "File or directory to search; defaults to the working directory"},
+				"include": {"type": "string", "description": "Only search files matching this glob, such as '*.py'"
+					if rg else "Only search files whose names match this glob, such as '*.py'"},
+				"ignore_case": {"type": "boolean", "description": "Case-insensitive search"},
+				"context": {"type": "integer", "description": "Lines of context to show around each match"},
+				**include_ignored("search"),
+			},
+			["pattern"]),
+		_schema("run_shell_command",
+			"Run a bash command and return its combined stdout and stderr. Each call starts a fresh shell "
+			"in the working directory. The filesystem is read-only except /tmp, and there is no network.",
+			{
+				"command": {"type": "string", "description": "The bash command to run"},
+				"timeout": {"type": "integer", "description": "Seconds before the command is killed (default 120, max 600)"},
+			},
+			["command"]),
+	]
 
 
 @dataclass
@@ -79,7 +88,7 @@ class Tools:
 	def __init__(self, sandbox: Sandbox):
 		self.sandbox = sandbox
 		self.rg = shutil.which("rg")
-		self.schemas = SCHEMAS
+		self.schemas = schemas(self.rg is not None)
 
 	def call(self, name: str, arguments: str) -> ToolResult:
 		try:

@@ -24,8 +24,8 @@ Artifice asks for your sudo password once per session (when sudo's ticket expire
 |---|---|
 | `read_file` | numbered lines with offset and limit; refuses binary and special files |
 | `list_directory` | entries with sizes |
-| `glob` | `rg --files -g` (falls back to Python's `glob`) |
-| `grep_search` | `rg` (falls back to `grep -rE`) |
+| `glob` | `rg --files -g` (falls back to a Python walk that ignores `.gitignore`) |
+| `grep_search` | `rg` (falls back to `grep -rE`, which ignores `.gitignore`) |
 | `run_shell_command` | `bash -c` |
 
 Each tool call runs in its own sandbox. Output over 30,000 characters is cut down to its head and tail.

@@ -75,11 +75,12 @@ class Agent:
 	def _loop(self) -> None:
 		while True:
 			self.maybe_compact()
-			message, stop_reason = self._generate(self.messages, self._template_args(), self._max_tokens())
+			max_tokens = self._max_tokens()
+			message, stop_reason = self._generate(self.messages, self._template_args(), max_tokens)
 			self.messages.append(message)
 			self.chat.save()
 			if stop_reason == "length":
-				self.ui.notice(f"Response hit max_tokens ({self._max_tokens()}) and was cut off.")
+				self.ui.notice(f"Response hit max_tokens ({max_tokens}) and was cut off.")
 			calls = message.get("tool_calls") or []
 			if not calls:
 				return
