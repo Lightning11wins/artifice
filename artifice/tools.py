@@ -5,7 +5,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from .helpers import strip_dot_slash
+from .helpers import expand_braces, strip_dot_slash
 from .sandbox import Result, Sandbox, SandboxError
 
 HELPERS = str(Path(__file__).with_name("helpers.py"))
@@ -180,7 +180,7 @@ class Tools:
 		else:
 			argv = ["grep", "-rnHE", "--line-buffered", "--binary-files=without-match", "--exclude-dir=.git"]
 			if include:
-				argv.append(f"--include={include}")
+				argv += [f"--include={p}" for p in expand_braces(include)]  # grep's --include has no braces
 		if ignore_case:
 			argv.append("-i")
 		if context:

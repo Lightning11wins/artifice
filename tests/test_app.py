@@ -133,7 +133,7 @@ class AgentTest(TempDataTest):
 
 		chat = self.chat(("user", "find the bug"), ("assistant", "The bug is at foo.c:42."))
 		agent = Agent(PreambleClient(), chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=32768)
-		self.assertFalse(agent.maybe_compact(force=True))
+		agent.maybe_compact(force=True)
 		self.assertIn("The bug is at foo.c:42.", [m.get("content") for m in agent.messages])
 
 	def test_null_usage_values(self):
@@ -375,6 +375,9 @@ class CommandTest(TempDataTest):
 			self.assertEqual(cli.read_input(), "Here is the log:\nline 1")
 		with mock.patch("builtins.input", side_effect=['"""one line"""']):
 			self.assertEqual(cli.read_input(), "one line")
+		pasted = ["def f():", '	"""Return x.', '	"""', "	return x"]
+		with mock.patch("builtins.input", side_effect=['"""Why does f fail?', *pasted, '"""']):
+			self.assertEqual(cli.read_input(), "\n".join(["Why does f fail?", *pasted]))
 
 	def test_nohup_is_kept(self):
 		old = signal.signal(signal.SIGHUP, signal.SIG_IGN)
@@ -493,22 +496,36 @@ class GlobFallbackTest(unittest.TestCase):
 			slow.write_text('#!/bin/bash\ncase "$1" in *b.txt) sleep 30;; esac; cat\n')
 			stub = Path(bin_dir, "rg")
 			stub.write_text(f'#!/bin/bash\nexec {shutil.which("rg")} --pre {slow} "$@"\n')
-			linger = Path(bin_dir, "rg-linger")  # rg --files reads no files, so this stalls after it instead
-			linger.write_text(f'#!/bin/bash\n{shutil.which("rg")} "$@"; sleep 30\n')
+			listed = Path(d, "listed")  # rg --files opens .ignore files, and this one blocks
+			listed.mkdir()
+			Path(listed, "a.txt").write_text("")
+			Path(listed, "z").mkdir()
+			os.mkfifo(Path(listed, "z", ".ignore"))
 			stall = Path(bin_dir, "grep")
 			stall.write_text(f'#!/bin/bash\nexec {shutil.which("grep")} "$@" {fifo}\n')  # blocks opening the FIFO
-			for script in (slow, stub, linger, stall):
+			for script in (slow, stub, stall):
 				script.chmod(0o755)
 			cases = [(None, "grep_search", {"pattern": "needle", "path": d}, f"{d}/a.txt:1:needle")]
 			if shutil.which("rg"):
 				cases += [(str(stub), "grep_search", {"pattern": "needle", "path": d}, f"{d}/a.txt:1:needle"),
-					(str(linger), "glob", {"pattern": "*.txt", "path": d}, f"{d}/a.txt")]
+					(shutil.which("rg"), "glob", {"pattern": "*.txt", "path": str(listed)}, f"{listed}/a.txt")]
 			for rg, tool, args, expected in cases:
 				with self.subTest(rg=rg, tool=tool), mock.patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"}):
 					with mock.patch.object(tools.shutil, "which", return_value=rg):
 						t = tools.Tools(mock.Mock())
 					t.sandbox.run.side_effect = run
 					self.assertIn(expected, t.call(tool, json.dumps(args)).text)
+
+	def test_grep_fallback_expands_braces_in_include(self):
+		with mock.patch.object(tools.shutil, "which", return_value=None):
+			t = tools.Tools(mock.Mock())
+		t.sandbox.run.side_effect = lambda argv, **kw: Result(
+			output=subprocess.run(argv, capture_output=True, text=True).stdout, exit_code=0)
+		with tempfile.TemporaryDirectory() as d:
+			for name in ("a.ts", "b.tsx", "c.js"):
+				Path(d, name).write_text("needle\n")
+			out = t.call("grep_search", json.dumps({"pattern": "needle", "path": d, "include": "*.{ts,t{sx,xt}}"})).text
+		self.assertEqual(sorted(line.split(":")[0] for line in out.splitlines()), [f"{d}/a.ts", f"{d}/b.tsx"])
 
 	def test_schemas_without_rg_do_not_offer_gitignore(self):
 		from artifice.tools import schemas

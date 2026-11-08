@@ -153,6 +153,17 @@ def _glob_body(pattern: str) -> str:
 	return "".join(out)
 
 
+def expand_braces(pattern: str) -> list[str]:
+	"""Expands each {a,b,...} in pattern into separate patterns."""
+	i = pattern.find("{")
+	while i != -1:
+		if alternatives := _brace_alternatives(pattern, i):
+			options, end = alternatives
+			return [p for option in options for p in expand_braces(pattern[:i] + option + pattern[end:])]
+		i = pattern.find("{", i + 1)
+	return [pattern]
+
+
 def _brace_alternatives(pattern: str, start: int) -> tuple[list[str], int] | None:
 	"""Splits {a,b,...} at start into its options and returns them with the index after }."""
 	depth = 0

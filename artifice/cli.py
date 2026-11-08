@@ -26,7 +26,7 @@ HELP = """Commands:
   /reasoning        show or hide the model's thinking
   /usage            show context usage
   /quit             exit (or Ctrl-D)
-Start a message with \"\"\" to type several lines; end it with \"\"\" on its own line."""
+Start a message with \"\"\" to type several lines; end it with \"\"\" alone at the start of a line."""
 
 
 # Control characters other than tab and newline, which could move the cursor or retitle the terminal.
@@ -154,7 +154,7 @@ def read_input() -> str | None:
 			more = input("")
 		except EOFError:
 			break
-		if more.strip() == '"""':
+		if more.rstrip() == '"""':  # unindented, so a pasted docstring's closing quotes stay in
 			break
 		lines.append(more)
 	return "\n".join(lines)
