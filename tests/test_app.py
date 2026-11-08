@@ -227,6 +227,59 @@ class AgentTest(TempDataTest):
 		self.assertEqual([(m["role"], m.get("tool_call_id")) for m in agent.messages[2:5]],
 			[("assistant", None), ("tool", "c1"), ("user", None)])
 
+	def test_a_message_too_long_for_the_context_is_removed(self):
+		class CountingClient(OverflowClient):
+			def stream(self, body):
+				self.requests = getattr(self, "requests", 0) + 1
+				if self.requests > 20:
+					raise AssertionError("the overflow retry did not stop")
+				yield from super().stream(body)
+
+		chat = self.chat(("user", "earlier"), ("assistant", "ok"))
+		agent = Agent(CountingClient(limit=16000), chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=16384)
+		with self.assertRaisesRegex(LLMError, "too long for the context \\(80,000 characters\\)"):
+			agent.send("x" * 80000)
+		agent.send("hi")
+		self.assertEqual(agent.messages[-1]["content"], "done")
+		self.assertNotIn("x" * 80000, [m["content"] for m in Chat.load(chat.id).messages])
+
+	def test_usage_from_summary_requests_is_not_counted_for_the_chat(self):
+		class UsageClient(FakeClient):
+			notes = "notes"
+
+			def stream(self, body):
+				if body["messages"][-1]["content"].startswith("Stop here."):
+					yield {"usage": {"prompt_tokens": 50, "completion_tokens": 5}}
+					yield {"token": self.notes}
+					return
+				yield from super().stream(body)
+
+		for notes in ("notes", ""):
+			with self.subTest(notes=notes):
+				client = UsageClient()
+				client.notes = notes
+				chat = self.chat(("user", "earlier"), ("assistant", "ok"), ("user", "next"))
+				agent = Agent(client, chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=32768)
+				agent.usage_tokens, agent.usage_n = 30000, len(chat.messages)
+				agent._summarize(keep_current=False)
+				if notes:
+					self.assertLess(agent.estimate_tokens(), 1000)
+				else:
+					self.assertGreaterEqual(agent.estimate_tokens(), 30000)
+
+	def test_old_tool_outputs_are_elided_before_summarizing(self):
+		chat = self.chat(("user", "earlier"))
+		for i in range(8):
+			chat.messages.append({"role": "assistant", "content": "", "tool_calls": [{"id": f"o{i}", "type": "function",
+				"function": {"name": "read_file", "arguments": "{}"}}]})
+			chat.messages.append({"role": "tool", "tool_call_id": f"o{i}", "content": "y" * 30000})
+		chat.messages.append({"role": "assistant", "content": "ok"})
+		client = FakeClient()
+		agent = Agent(client, chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=100000)
+		agent.send("go")
+		self.assertEqual(client.summaries, 0)
+		self.assertEqual(sum(m["content"] == "y" * 30000 for m in agent.messages), 6)
+
 	def test_one_shot_narration_before_a_tool_call_stays_off_stdout(self):
 		class NarratingClient(FakeClient):
 			def stream(self, body):
@@ -635,12 +688,62 @@ class MainTest(unittest.TestCase):
 
 
 class ClientTest(unittest.TestCase):
+	def stream(self, *lines: str) -> list[dict]:
+		import http.server
+		import threading
+		from artifice.client import LLMClient
+
+		class Handler(http.server.BaseHTTPRequestHandler):
+			def do_POST(self):
+				self.rfile.read(int(self.headers["Content-Length"]))
+				self.send_response(200)
+				self.send_header("Content-Type", "text/event-stream")
+				self.end_headers()
+				self.wfile.write("".join(f"data: {line}\n\n" for line in lines).encode())
+
+			def log_message(self, *args):
+				pass
+
+		server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+		threading.Thread(target=server.serve_forever, daemon=True).start()
+		self.addCleanup(server.server_close)
+		self.addCleanup(server.shutdown)
+		events = []
+		try:
+			for event in LLMClient("127.0.0.1", server.server_address[1]).stream({}):
+				events.append(event)
+		finally:
+			self.events = events
+		return events
+
+	def test_stream_yields_events_until_done(self):
+		self.assertEqual(self.stream('{"token": "a"}', "[DONE]", '{"token": "b"}'), [{"token": "a"}])
+
+	def test_stream_without_done_is_an_error(self):
+		with self.assertRaisesRegex(LLMError, "without \\[DONE\\]"):
+			self.stream('{"token": "a"}')
+		self.assertEqual(self.events, [{"token": "a"}])
+
+	def test_error_event_is_an_error(self):
+		with self.assertRaisesRegex(LLMError, "Failed to generate: boom"):
+			self.stream('{"token": "a"}', '{"error": "boom"}', "[DONE]")
+
 	def test_bad_host_is_an_llm_error(self):
 		from artifice.client import LLMClient
 		with self.assertRaisesRegex(LLMError, "Failed to reach llm-server"):
 			LLMClient("local host", 8741).list()
 		with self.assertRaisesRegex(LLMError, "Failed to reach llm-server"):
 			LLMClient("foo..bar", 8741).list()
+
+
+class StoreTest(TempDataTest):
+	def test_saved_chats_are_private(self):
+		os.makedirs(os.path.join(self.data.name, "artifice"), mode=0o755)
+		os.chmod(os.path.join(self.data.name, "artifice"), 0o755)
+		chat = self.chat(("user", "secret"))
+		chat.save()
+		self.assertEqual(chat.path.stat().st_mode & 0o777, 0o600)
+		self.assertEqual(chat.path.parent.parent.stat().st_mode & 0o777, 0o700)
 
 
 class DepsTest(TempDataTest):

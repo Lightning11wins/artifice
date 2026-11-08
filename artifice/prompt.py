@@ -59,4 +59,5 @@ SUMMARY_LABEL = """[Compacted context] The earlier part of this chat was removed
 </notes>"""
 
 ELIDED = "[Output elided to save context. Run the tool again if you need it.]"
+TOO_LONG = "[Message removed: it was too long for the context ({chars:,} characters).]"
 TOO_LARGE = "[Output too large for the context ({chars:,} characters). Narrow the command, or read fewer lines with offset and limit.]"

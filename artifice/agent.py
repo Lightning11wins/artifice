@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from .client import LLMClient, LLMError
-from .prompt import ELIDED, SUMMARY_LABEL, SUMMARY_REQUEST, TOO_LARGE
+from .prompt import ELIDED, SUMMARY_LABEL, SUMMARY_REQUEST, TOO_LARGE, TOO_LONG
 from .store import Chat
 from .tools import ToolResult, Tools
 
@@ -106,6 +106,7 @@ class Agent:
 				self.bytes_per_token = max(0.5, min(self.bytes_per_token, size / self.context_length))
 				self.usage_tokens, self.usage_n = self.context_length, len(self.messages)
 				if overflowed_at is not None and size >= overflowed_at:
+					self._remove_oversized_request(size, e)
 					raise
 				overflowed_at = size
 				self.ui.notice("The conversation is over the context limit. Compacting.")
@@ -126,6 +127,18 @@ class Agent:
 				self.ui.tool_result(name, result)
 				self.messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": result.text})
 			self.chat.save()
+
+	def _remove_oversized_request(self, size: int, error: LLMError) -> None:
+		"""Replaces the current user message when it is most of an overflow compaction cannot fix, so later turns work."""
+		last_user = max((i for i, m in enumerate(self.messages) if m["role"] == "user"), default=None)
+		if last_user is None:
+			return
+		content = self.messages[last_user].get("content") or ""
+		if len(content.encode()) <= size / 2:
+			return
+		self.messages[last_user]["content"] = TOO_LONG.format(chars=len(content))
+		self.chat.save()
+		raise LLMError(f"Failed to send: the message is too long for the context ({len(content):,} characters).") from error
 
 	def _template_args(self) -> dict:
 		if self.settings.thinking is None:
