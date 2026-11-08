@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from artifice import cli, deps, helpers, tools  # noqa: E402
 from artifice.agent import Agent, Settings  # noqa: E402
 from artifice.client import LLMError  # noqa: E402
-from artifice.sandbox import READ_ONLY, Sandbox, SandboxError  # noqa: E402
+from artifice.sandbox import READ_ONLY, Result, Sandbox, SandboxError  # noqa: E402
 from artifice.store import Chat  # noqa: E402
 from artifice.tools import ToolResult  # noqa: E402
 
@@ -207,6 +207,15 @@ class ToolsTest(unittest.TestCase):
 				self.assertTrue(result.error)
 				self.assertIn("path must be a string", result.text)
 
+	def test_null_optional_arguments_take_defaults(self):
+		sandbox = mock.Mock()
+		sandbox.run.return_value = Result(output="./a.py\n", exit_code=0, timed_out=False, truncated_bytes=0)
+		with mock.patch.object(tools.shutil, "which", return_value="/usr/bin/rg"):
+			t = tools.Tools(sandbox)
+		self.assertFalse(t.call("glob", json.dumps({"pattern": "*.py", "path": None})).error)
+		self.assertFalse(t.call("grep_search", json.dumps({"pattern": "x", "include": None, "context": None})).error)
+		self.assertIn("pattern must be a string", t.call("glob", json.dumps({"pattern": None})).text)
+
 
 class CommandTest(TempDataTest):
 	def test_paths_are_messages(self):
@@ -235,6 +244,11 @@ class CommandTest(TempDataTest):
 		self.addCleanup(signal.signal, signal.SIGTERM, signal.getsignal(signal.SIGTERM))
 		cli.exit_on_sigterm()
 		self.assertEqual(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+
+	def test_bad_port_in_the_environment_is_an_argument_error(self):
+		with mock.patch.dict(os.environ, {"LLM_PORT": "abc"}), mock.patch.object(sys, "argv", ["artifice"]), \
+				mock.patch.object(sys, "stderr"), self.assertRaises(SystemExit):
+			cli.parse_args()
 
 	def test_sampling_arguments_are_validated(self):
 		for flag, value in (("--temperature", "0"), ("--top-p", "0"), ("--top-p", "1.5")):

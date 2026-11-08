@@ -113,8 +113,10 @@ class Tools:
 		schema = next((s["function"] for s in self.schemas if s["function"]["name"] == name), None)
 		if schema is None or method is None:
 			return ToolResult(f"Error: unknown tool {name}", True)
-		properties = schema["parameters"]["properties"]
+		properties, required = schema["parameters"]["properties"], schema["parameters"]["required"]
 		for key, value in args.items():
+			if value is None and key not in required:
+				continue  # optional arguments sent as null take their defaults
 			if properties.get(key, {}).get("type") == "string" and not isinstance(value, str):
 				return ToolResult(f"Error: bad arguments for {name}: {key} must be a string, not {value!r}", True)
 		try:

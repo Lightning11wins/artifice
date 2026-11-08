@@ -108,7 +108,7 @@ def parse_args() -> argparse.Namespace:
 	p = argparse.ArgumentParser(prog="artifice", description="Chat with a local model that has read-only access to this computer.")
 	p.add_argument("--model", help=f"model name from `llm list` (default {DEFAULT_MODEL})")
 	p.add_argument("--host", default=os.environ.get("LLM_HOST", "localhost"))
-	p.add_argument("--port", type=int, default=int(os.environ.get("LLM_PORT", "8741")))
+	p.add_argument("--port", type=int, default=os.environ.get("LLM_PORT", "8741"))
 	p.add_argument("-r", "--resume", metavar="ID", help="resume a saved chat")
 	p.add_argument("-c", "--continue", dest="cont", action="store_true", help="resume the most recent chat")
 	p.add_argument("-p", "--prompt", help="answer one prompt and exit; the answer goes to stdout, the trace to stderr")
