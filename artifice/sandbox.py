@@ -3,14 +3,17 @@
 bwrap runs as root through sudo, so it can grant CAP_DAC_READ_SEARCH in the host user namespace.
 setpriv then drops to the user's uid keeping only that capability, and confine.py adds Landlock and seccomp.
 """
+import fcntl
 import json
 import os
 import selectors
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
+import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,13 +58,27 @@ class Sandbox:
 		self.notify = notify or (lambda text: print(text, file=sys.stderr))
 		self.bwrap = shutil.which("bwrap") or "bwrap"
 		self.setpriv = shutil.which("setpriv") or "setpriv"
-		self._systemd = _systemd_scope_works()
+		self._systemd = shutil.which("systemd-run") is not None and os.path.isdir("/run/systemd/system")
 		self._passwordless = False
+		self._lock = self._lock_scratch()
+		weakref.finalize(self, os.close, self._lock)
+
+	def _lock_scratch(self) -> int:
+		"""Holds a shared lock on the scratch directory, so clean_scratch skips it while this chat is open."""
+		for _ in range(3):
+			self.scratch.mkdir(mode=0o700, parents=True, exist_ok=True)
+			fd = os.open(self.scratch, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+			fcntl.flock(fd, fcntl.LOCK_SH)
+			try:
+				if os.path.samestat(os.fstat(fd), os.lstat(self.scratch)):
+					return fd
+			except OSError:
+				pass
+			os.close(fd)  # clean_scratch removed it before the lock was taken
+		raise SandboxError(f"Failed to lock scratch directory {self.scratch}")
 
 	def command(self) -> list[str]:
 		"""The sandbox command line. The command to run goes on stdin, which keeps it out of sudo's logs."""
-		# Another instance's clean_scratch may have removed it while empty.
-		self.scratch.mkdir(mode=0o700, parents=True, exist_ok=True)
 		home = os.path.expanduser("~")
 		env = {
 			"PATH": "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin",
@@ -77,16 +94,17 @@ class Sandbox:
 			"XDG_CACHE_HOME": "/tmp/.cache",
 			"PYTHONDONTWRITEBYTECODE": "1",
 		}
-		cmd: list[str] = []
+		cmd = ["sudo", "-n"]
 		if self._systemd:
+			# A system scope, because sudo's PAM session can move it out of a user scope.
 			cmd += [
-				"systemd-run", "--user", "--scope", "--quiet", "--collect",
+				"systemd-run", "--scope", "--quiet", "--collect",
 				"-p", f"MemoryMax={self.profile.memory_max}",
 				"-p", "MemorySwapMax=0",
 				"-p", f"TasksMax={self.profile.tasks_max}",
 			]
 		cmd += [
-			"sudo", "-n", self.bwrap,
+			self.bwrap,
 			"--ro-bind", "/", "/",
 			"--dev", "/dev",
 			# The host's /proc shows every process, but PIDs given to kill or ptrace resolve in the new PID namespace.
@@ -101,7 +119,7 @@ class Sandbox:
 			cmd += ["--setenv", key, value]
 		for cap in ("CAP_DAC_READ_SEARCH", "CAP_SETUID", "CAP_SETGID", "CAP_SETPCAP"):
 			cmd += ["--cap-add", cap]
-		cwd = self.cwd if os.path.isdir(self.cwd) else home
+		cwd = self.cwd if os.path.isdir(self.cwd) and not hidden_by_scratch(self.cwd) else home
 		groups = os.getgroups()
 		cmd += ["--chdir", cwd, "--"]
 		cmd += [
@@ -122,7 +140,7 @@ class Sandbox:
 			return
 		if _quiet(["sudo", "-n", "-v"]):
 			return
-		if _quiet(["sudo", "-n", "true"]):
+		if _quiet(["sudo", "-n", self.bwrap, "--version"]):
 			self._passwordless = True
 			return
 		if not sys.stdin.isatty():
@@ -132,7 +150,7 @@ class Sandbox:
 			raise SandboxError("Failed to authenticate with sudo.")
 
 	def run(self, argv: list[str], timeout: int | None = None) -> Result:
-		timeout = min(timeout or self.profile.timeout, self.profile.max_timeout)
+		timeout = max(1, min(timeout or self.profile.timeout, self.profile.max_timeout))
 		self.ensure_sudo()
 		# No new session: sudo finds its cached login through this terminal.
 		proc = subprocess.Popen(
@@ -188,6 +206,11 @@ class Sandbox:
 		for tool, package in (("bwrap", "bubblewrap"), ("setpriv", "util-linux"), ("sudo", "sudo")):
 			if not shutil.which(tool):
 				raise SandboxError(f"Failed to find {tool} (package: {package})")
+		for path in (sys.executable, CONFINE):
+			if hidden_by_scratch(path):
+				raise SandboxError(f"Failed to start sandbox: {path} is under /tmp, which the sandbox replaces with scratch")
+		if not self._systemd:
+			self.notify("systemd is not running, so sandboxed commands have no memory or process limits.")
 		result = self.run(["true"], timeout=30)
 		if result.exit_code != 0:
 			raise SandboxError(f"Failed to start sandbox (exit {result.exit_code}): {result.output.strip()}")
@@ -207,38 +230,47 @@ def _quiet(argv: list[str]) -> bool:
 	return subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True).returncode == 0
 
 
-def _systemd_scope_works() -> bool:
-	if not shutil.which("systemd-run"):
-		return False
-	try:
-		probe = subprocess.run(
-			["systemd-run", "--user", "--scope", "--quiet", "--collect", "true"],
-			stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
-		)
-	except (OSError, subprocess.TimeoutExpired):
-		return False
-	return probe.returncode == 0
+def hidden_by_scratch(path: str) -> bool:
+	"""Whether path is under the host's /tmp, which the sandbox replaces with scratch."""
+	return any(p == "/tmp" or p.startswith("/tmp/") for p in (os.path.abspath(path), os.path.realpath(path)))
 
 
 def clean_scratch(root: Path, max_age: int = SCRATCH_MAX_AGE) -> None:
-	"""Deletes scratch files older than max_age, then empty directories. Never follows symlinks."""
-	if not root.is_dir():
+	"""Deletes old files from the scratch directories of chats that are not open, then empty directories.
+
+	A file's age counts from its last change in scratch, the later of mtime and ctime. Symlinks are never followed.
+	"""
+	try:
+		root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+	except OSError:
 		return
 	cutoff = time.time() - max_age
-	for dirpath, dirnames, filenames in os.walk(root, topdown=False):
-		for name in filenames:
-			path = os.path.join(dirpath, name)
+	try:
+		for name in os.listdir(root_fd):
 			try:
-				if os.lstat(path).st_mtime < cutoff:
-					os.unlink(path)
+				fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root_fd)
+			except OSError:
+				continue
+			try:
+				fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+				_clean_dir(fd, cutoff)
+				os.rmdir(name, dir_fd=root_fd)
 			except OSError:
 				pass
-		for name in dirnames:
-			path = os.path.join(dirpath, name)
+			finally:
+				os.close(fd)
+	finally:
+		os.close(root_fd)
+
+
+def _clean_dir(top_fd: int, cutoff: float) -> None:
+	for _path, dirnames, filenames, dir_fd in os.fwalk(".", dir_fd=top_fd, topdown=False, follow_symlinks=False):
+		for name in filenames + dirnames:
 			try:
-				if not os.path.islink(path):
-					os.rmdir(path)
-				elif os.lstat(path).st_mtime < cutoff:
-					os.unlink(path)
+				st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+				if stat.S_ISDIR(st.st_mode):
+					os.rmdir(name, dir_fd=dir_fd)
+				elif max(st.st_mtime, st.st_ctime) < cutoff:
+					os.unlink(name, dir_fd=dir_fd)
 			except OSError:
 				pass

@@ -1,7 +1,8 @@
 """Confines this process with Landlock and seccomp, then execs a command.
 
 Runs inside the bwrap sandbox, closing the gaps a read-only bind mount leaves open:
-FIFOs on the host filesystem stay writable, and so do unix sockets (dbus, ssh-agent, ...).
+FIFOs on the host filesystem stay writable, unix sockets (dbus, ssh-agent, ...) stay reachable,
+and socket families without network namespaces, like vsock and Bluetooth, can still talk to other machines.
 
 Usage: confine.py [--write DIR]... [--fsize BYTES] (--argv-stdin | -- COMMAND [ARG]...)
 
@@ -55,7 +56,7 @@ ARCHES = {
 }
 IO_URING_SYSCALLS = (425, 426, 427)  # setup, enter, register; io_uring can open sockets past seccomp
 X32_SYSCALL_BIT = 0x40000000
-AF_UNIX = 1
+ALLOWED_FAMILIES = (2, 10, 16)  # AF_INET, AF_INET6, AF_NETLINK; all confined by the network namespace
 
 BPF_LD_W_ABS = 0x20
 BPF_JEQ_K = 0x15
@@ -64,8 +65,8 @@ BPF_RET_K = 0x06
 SECCOMP_RET_KILL_PROCESS = 0x80000000
 SECCOMP_RET_ERRNO = 0x00050000
 SECCOMP_RET_ALLOW = 0x7FFF0000
-EPERM = 1
 EACCES = 13
+ENOSYS = 38
 
 
 class SockFprog(ctypes.Structure):
@@ -122,11 +123,15 @@ def seccomp_program(arch: dict[str, int]) -> bytes:
 	# open_by_handle_at opens files outside the sandbox's mounts when CAP_DAC_READ_SEARCH is held.
 	denied = (*IO_URING_SYSCALLS, arch["open_by_handle_at"], arch["add_key"], arch["request_key"], arch["keyctl"])
 	for nr in denied:
-		prog += [jump(BPF_JEQ_K, nr, 0, 1), stmt(BPF_RET_K, errno(EPERM))]
+		prog += [jump(BPF_JEQ_K, nr, 0, 1), stmt(BPF_RET_K, errno(ENOSYS))]
+	families = len(ALLOWED_FAMILIES)
 	prog += [
-		jump(BPF_JEQ_K, arch["socket"], 0, 3),
+		jump(BPF_JEQ_K, arch["socket"], 0, families + 2),
 		stmt(BPF_LD_W_ABS, 16),  # low word of seccomp_data.args[0], the address family
-		jump(BPF_JEQ_K, AF_UNIX, 0, 1),
+	]
+	for i, family in enumerate(ALLOWED_FAMILIES):
+		prog.append(jump(BPF_JEQ_K, family, families - i, 0))
+	prog += [
 		stmt(BPF_RET_K, errno(EACCES)),
 		stmt(BPF_RET_K, SECCOMP_RET_ALLOW),
 	]

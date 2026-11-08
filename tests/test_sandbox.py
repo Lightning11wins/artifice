@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from artifice.sandbox import READ_ONLY, Sandbox, clean_scratch  # noqa: E402
+from artifice.sandbox import READ_ONLY, Profile, Sandbox, clean_scratch  # noqa: E402
 
 # Host directory the sandbox can see but must not modify. Under $HOME, not /tmp, which the sandbox replaces.
 HOST_DIR = Path.home() / ".cache" / "artifice-tests"
@@ -86,7 +86,7 @@ if fd >= 0:
 	os.write(fd, b"pwned")
 """)
 		self.assertIn("name 0", r.output)
-		self.assertIn("open -1 1", r.output)
+		self.assertRegex(r.output, r"(?m)^open -1 38$")  # ENOSYS from seccomp
 		self.assertUnchanged()
 
 	def test_linkat_empty_path_escape(self):
@@ -167,6 +167,22 @@ open("/tmp/linked", "w").write("pwned")
 		server.close()
 		self.assertNotEqual(r.exit_code, 0, r.output)
 
+	def test_socket_families(self):
+		# Only families confined by the network namespace are allowed. vsock and Bluetooth reach other machines.
+		r = self.py("""
+import socket
+for family in (1, 40, 31, 38, 17):  # AF_UNIX, AF_VSOCK, AF_BLUETOOTH, AF_ALG, AF_PACKET
+	try:
+		socket.socket(family, socket.SOCK_STREAM if family != 17 else socket.SOCK_RAW).close()
+		print(family, 0)
+	except OSError as e:
+		print(family, e.errno)
+for family in (socket.AF_INET, socket.AF_INET6, socket.AF_NETLINK):
+	socket.socket(family, socket.SOCK_DGRAM).close()
+print("ok")
+""")
+		self.assertEqual(r.output.split(), ["1", "13", "40", "13", "31", "13", "38", "13", "17", "13", "ok"], r.output)
+
 	def test_fifo_on_host_fs(self):
 		fifo = self.host / "fifo"
 		os.mkfifo(fifo)
@@ -243,10 +259,42 @@ open("/tmp/linked", "w").write("pwned")
 			"nr = {'x86_64': {'uring': 425, 'keyctl': 250, 'handle': 304}, "
 			"'aarch64': {'uring': 425, 'keyctl': 219, 'handle': 265}}[platform.machine()]; "
 			"buf = ctypes.create_string_buffer(128); "
-			"print(libc.syscall(nr['uring'], 8, buf), libc.syscall(nr['keyctl'], 0, -4, 0), "
-			"libc.syscall(nr['handle'], -100, buf, 0))")
+			"calls = [(nr['uring'], 8, buf), (nr['keyctl'], 0, -4, 0), (nr['handle'], -100, buf, 0)]; "
+			"print(*[(libc.syscall(*c), ctypes.get_errno())[1] for c in calls])")
 		r = self.py(code)
-		self.assertEqual(r.output.split(), ["-1", "-1", "-1"], r.output)
+		self.assertEqual(r.output.split(), ["38", "38", "38"], r.output)  # ENOSYS from seccomp
+
+	def test_memory_and_task_limits(self):
+		sb = Sandbox(Profile(name="small", memory_max="64M", tasks_max=32), self.scratch, str(self.host))
+		if not sb._systemd:
+			self.skipTest("needs systemd")
+		r = sb.run([sys.executable, "-I", "-c", "b = b'x' * (256 << 20); print('allocated')"], timeout=20)
+		self.assertNotIn("allocated", r.output)
+		self.assertNotEqual(r.exit_code, 0, r.output)
+		r = sb.run([sys.executable, "-I", "-c", """
+import os, time
+n = 0
+try:
+	for _ in range(100):
+		if os.fork() == 0:
+			os.close(1)
+			os.close(2)
+			time.sleep(30)
+			os._exit(0)
+		n += 1
+except OSError as e:
+	print("blocked", n, e.errno)
+"""], timeout=20)
+		self.assertRegex(r.output, r"^blocked \d+ 11", r.output)  # EAGAIN
+		self.assertLess(int(r.output.split()[1]), 32)
+
+	def test_cwd_under_host_tmp(self):
+		tmp = tempfile.mkdtemp(dir="/tmp", prefix="artifice-test-")
+		try:
+			r = Sandbox(READ_ONLY, self.scratch, tmp).run(["pwd"])
+		finally:
+			os.rmdir(tmp)
+		self.assertEqual(r.output.strip(), str(Path.home()), r.output)
 
 	def test_timeout_and_background_processes(self):
 		start = time.monotonic()
@@ -275,19 +323,34 @@ open("/tmp/linked", "w").write("pwned")
 		root = Path(tempfile.mkdtemp(dir=HOST_DIR, prefix="clean-"))
 		outside = self.host / "keep"
 		outside.write_text("keep")
-		old = time.time() - 3 * 24 * 3600
-		os.utime(outside, (old, old))
 		chat = root / "chat"
-		chat.mkdir()
+		(chat / "sub").mkdir(parents=True)
 		(chat / "link").symlink_to(self.host)
-		(chat / "old").write_text("x")
-		os.utime(chat / "old", (old, old))
-		(chat / "new").write_text("x")
-		clean_scratch(root)
+		(chat / "sub" / "link").symlink_to(outside)
+		(chat / "file").write_text("x")
+		clean_scratch(root, max_age=-60)  # everything counts as old
 		self.assertTrue(outside.exists())
-		self.assertFalse((chat / "old").exists())
-		self.assertTrue((chat / "new").exists())
+		self.assertFalse(chat.exists())
 		outside.unlink()
+
+	def test_clean_scratch_skips_open_chats_and_counts_from_ctime(self):
+		root = Path(tempfile.mkdtemp(dir=HOST_DIR, prefix="clean-"))
+		Sandbox(READ_ONLY, root / "closed", str(self.host))  # dropped at once, which releases its lock
+		open_chat = Sandbox(READ_ONLY, root / "open", str(self.host))
+		for name in ("closed", "open"):
+			(root / name / "file").write_text("x")
+		clean_scratch(root, max_age=-60)
+		self.assertFalse((root / "closed").exists())
+		self.assertTrue((root / "open" / "file").exists())
+		del open_chat
+		# An extracted file keeps its old mtime, but its ctime is when it arrived in scratch.
+		extracted = root / "new" / "extracted"
+		extracted.parent.mkdir()
+		extracted.write_text("x")
+		old = time.time() - 3 * 24 * 3600
+		os.utime(extracted, (old, old))
+		clean_scratch(root)
+		self.assertTrue(extracted.exists())
 
 
 if __name__ == "__main__":
