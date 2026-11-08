@@ -1,6 +1,7 @@
 """Terminal chat front end."""
 import argparse
 import os
+import re
 import readline
 import sys
 from pathlib import Path
@@ -27,6 +28,14 @@ HELP = """Commands:
 Start a line with \"\"\" to type several lines; end with \"\"\" on its own line."""
 
 
+# Control characters other than tab and newline, which could move the cursor or retitle the terminal.
+CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def _printable(text: str) -> str:
+	return CONTROL.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
+
+
 class TerminalUI:
 	def __init__(self, answer_out=sys.stdout, trace_out=sys.stdout, show_reasoning: bool = True):
 		self.out = answer_out
@@ -42,7 +51,7 @@ class TerminalUI:
 		if not self.show_reasoning:
 			return
 		self.state = "reasoning"
-		self.trace.write(self._c("2", text))
+		self.trace.write(self._c("2", _printable(text)))
 		self.trace.flush()
 
 	def token(self, text: str) -> None:
@@ -50,7 +59,7 @@ class TerminalUI:
 			self.trace.write("\n\n")
 			self.trace.flush()
 		self.state = "answer"
-		self.out.write(text)
+		self.out.write(_printable(text))
 		self.out.flush()
 
 	def end_stream(self) -> None:
@@ -62,7 +71,7 @@ class TerminalUI:
 		self.state = None
 
 	def tool_call(self, name: str, arguments: str) -> None:
-		line = describe_call(name, arguments)
+		line = _printable(describe_call(name, arguments))
 		if len(line) > 300:
 			line = line[:300] + "..."
 		self.trace.write(self._c("36", f"● {line}") + "\n")
@@ -70,7 +79,7 @@ class TerminalUI:
 
 	def tool_result(self, name: str, result: ToolResult) -> None:
 		lines = result.text.splitlines() or [""]
-		shown = [line[:160] for line in lines[:4]]
+		shown = [_printable(line[:160]) for line in lines[:4]]
 		if len(lines) > 4:
 			shown.append(f"... ({len(lines) - 4} more lines)")
 		code = "31" if result.error else "2"
@@ -78,7 +87,7 @@ class TerminalUI:
 		self.trace.flush()
 
 	def notice(self, text: str) -> None:
-		self.trace.write(self._c("33", f"[{text}]") + "\n")
+		self.trace.write(self._c("33", f"[{_printable(text)}]") + "\n")
 		self.trace.flush()
 
 
@@ -134,23 +143,22 @@ class App:
 		self.loaded: str | None = None
 		self.agent: Agent | None = None
 
-	def load_model(self) -> None:
-		self.ui.notice(f"Loading {self.settings.model} from {self.args.host}:{self.args.port}...")
-		info = self.client.load(self.settings.model, self.settings.ttl)
-		self.context_length = info.get("context_length") or 0
-		if not self.context_length:
-			self.context_length = FALLBACK_CONTEXT
+	def load_model(self, model: str) -> int:
+		"""Loads model and returns its context length."""
+		self.ui.notice(f"Loading {model} from {self.args.host}:{self.args.port}...")
+		context_length = self.client.load(model, self.settings.ttl).get("context_length")
+		if not context_length:
 			self.ui.notice(f"The server did not report a context length. Assuming {FALLBACK_CONTEXT:,} tokens.")
-		self.loaded = self.settings.model
+		return context_length or FALLBACK_CONTEXT
 
 	def open_chat(self, chat: Chat) -> None:
-		if self.args.model is None:
-			self.settings.model = chat.model
-		chat.model = self.settings.model
-		if self.loaded != self.settings.model:
-			self.load_model()
+		"""Switches to chat. On failure, the current chat and its settings are unchanged."""
+		model = self.args.model or chat.model
+		context_length = self.context_length if model == self.loaded else self.load_model(model)
 		sandbox = Sandbox(READ_ONLY, scratch_root() / chat.id, chat.cwd, notify=self.ui.notice)
 		sandbox.check()
+		self.loaded, self.context_length = model, context_length
+		self.settings.model = chat.model = model
 		self.agent = Agent(self.client, chat, Tools(sandbox), self.settings, self.ui, self.context_length)
 
 	def new_chat(self) -> Chat:
@@ -248,11 +256,25 @@ class App:
 		except LLMError as e:
 			self.ui.notice(str(e))
 			return
+		except KeyboardInterrupt:
+			return
 		used = self.agent.estimate_tokens()
 		self.ui.notice(f"{used:,} / {self.agent.context_length:,} tokens")
 
 
 def main() -> None:
+	for stream in (sys.stdout, sys.stderr):
+		stream.reconfigure(errors="backslashreplace")
+	try:
+		_main()
+	except KeyboardInterrupt:
+		sys.exit(130)
+	except BrokenPipeError:
+		os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())  # so the exit flush does not fail again
+		sys.exit(141)
+
+
+def _main() -> None:
 	args = parse_args()
 	if not deps.ensure(data_dir() / "state.json", recheck=args.check_deps):
 		sys.exit("Failed to start: bwrap is required to sandbox the model's tools.")
@@ -269,8 +291,6 @@ def main() -> None:
 		app.open_chat(chat)
 	except (LLMError, SandboxError, FileNotFoundError, ValueError) as e:
 		sys.exit(str(e))
-	except KeyboardInterrupt:
-		sys.exit(130)
 
 	if args.prompt is not None:
 		try:

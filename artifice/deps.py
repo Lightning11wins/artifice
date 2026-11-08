@@ -23,13 +23,13 @@ def _install_command(manager: str, packages: list[str]) -> list[str]:
 	return ["sudo", "dnf", "install", "-y", *packages]
 
 
-def _ask(question: str) -> bool:
-	if not sys.stdin.isatty():
-		return False
-	try:
-		return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
-	except EOFError:
-		return False
+def _ask(question: str) -> bool | None:
+	"""Asks a yes or no question on stderr. Returns None when there is no terminal to ask on."""
+	if not (sys.stdin.isatty() and sys.stderr.isatty()):
+		return None
+	sys.stderr.write(f"{question} [y/N] ")
+	sys.stderr.flush()
+	return sys.stdin.readline().strip().lower() in ("y", "yes")
 
 
 def _load_state(path: Path) -> dict:
@@ -55,13 +55,16 @@ def ensure(state_path: Path, recheck: bool = False) -> bool:
 				ok = ok and not required
 				continue
 			argv = _install_command(manager, [packages[manager]])
-			if _ask(f"Missing {command} ({purpose}). Run `{' '.join(argv)}`?"):
-				subprocess.run(argv)
+			answer = _ask(f"Missing {command} ({purpose}). Run `{' '.join(argv)}`?")
+			if answer:
+				subprocess.run(argv, stdout=sys.stderr)
 			if shutil.which(command):
 				continue
 			if required:
 				ok = False
-			else:
+				if answer is None:
+					print(f"Missing {command} ({purpose}). Run `{' '.join(argv)}`.", file=sys.stderr)
+			elif answer is False:
 				declined.add(command)
 				print(f"Using fallbacks without {command}. Run with --check-deps to be asked again.", file=sys.stderr)
 	state["declined"] = sorted(declined)

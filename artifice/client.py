@@ -23,13 +23,16 @@ class LLMClient:
 				headers={"Content-Type": "application/json"})
 			resp = conn.getresponse()
 			data = resp.read()
-		except OSError as e:
-			raise LLMError(f"Failed to reach llm-server at {self.host}:{self.port}: {e}") from e
+		except (OSError, http.client.HTTPException) as e:
+			raise LLMError(f"Failed to reach llm-server at {self.host}:{self.port}: {e!r}") from e
 		finally:
 			conn.close()
 		if resp.status != 200:
 			raise LLMError(f"Failed {method} {path}: HTTP {resp.status}: {_error_text(data)}")
-		return json.loads(data)
+		try:
+			return json.loads(data)
+		except ValueError as e:
+			raise LLMError(f"Failed to parse the reply to {method} {path}: {data[:200]!r}") from e
 
 	def list(self) -> list[dict]:
 		return self._request("GET", "/list?loaded=any")
@@ -44,10 +47,14 @@ class LLMClient:
 			try:
 				conn.request("POST", "/run", body=json.dumps(body), headers={"Content-Type": "application/json"})
 				resp = conn.getresponse()
-			except OSError as e:
-				raise LLMError(f"Failed to reach llm-server at {self.host}:{self.port}: {e}") from e
+			except (OSError, http.client.HTTPException) as e:
+				raise LLMError(f"Failed to reach llm-server at {self.host}:{self.port}: {e!r}") from e
 			if resp.status != 200:
-				raise LLMError(f"Failed to generate: HTTP {resp.status}: {_error_text(resp.read())}")
+				try:
+					data = resp.read()
+				except (OSError, http.client.HTTPException) as e:
+					raise LLMError(f"Failed to generate: HTTP {resp.status}, then {e!r}") from e
+				raise LLMError(f"Failed to generate: HTTP {resp.status}: {_error_text(data)}")
 			saw_done = False
 			for payload in _events(resp, self.host, self.port):
 				if payload == "[DONE]":

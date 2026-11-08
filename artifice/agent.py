@@ -65,6 +65,10 @@ class Agent:
 		except KeyboardInterrupt:
 			self._close_open_tool_calls("Interrupted by the user before this tool finished.")
 			self.ui.notice("Interrupted.")
+			raise
+		except Exception:
+			self._close_open_tool_calls("Artifice failed before this tool finished.")
+			raise
 		finally:
 			self.chat.save()
 
@@ -133,9 +137,10 @@ class Agent:
 				elif "stop_reason" in event:
 					stop_reason = event["stop_reason"]
 				elif "usage" in event and messages is self.messages:
-					usage = event["usage"]
-					self.usage_tokens = usage["prompt_tokens"] + usage["completion_tokens"]
-					self.usage_n = len(self.messages) + 1  # counts the reply about to be appended
+					usage = event["usage"] or {}
+					if usage.get("prompt_tokens") is not None:
+						self.usage_tokens = usage["prompt_tokens"] + (usage.get("completion_tokens") or 0)
+						self.usage_n = len(self.messages) + 1  # counts the reply about to be appended
 					self.context_length = usage.get("context_length") or self.context_length
 		finally:
 			if display:
@@ -165,14 +170,16 @@ class Agent:
 		"""Elides old tool outputs past compact_at, and summarizes when that is not enough.
 
 		force summarizes the whole conversation, for use between turns."""
-		estimate = self.estimate_tokens()
-		if not force and estimate < self.settings.compact_at * self.context_length:
+		limit = self.settings.compact_at * self.context_length
+		target = self.settings.compact_to * self.context_length
+		if not force and self.estimate_tokens() < limit:
 			return
-		estimate = self._elide(self.settings.compact_to * self.context_length, self.settings.keep_tool_results)
-		if not force and estimate < self.settings.compact_at * self.context_length:
+		if not force and self._elide(target, self.settings.keep_tool_results) < limit:
 			return
-		if not self._summarize(keep_current=not force):
-			self._elide(self.settings.compact_to * self.context_length, keep=2)
+		if self._summarize(keep_current=not force) and self.estimate_tokens() < limit:
+			return
+		if self._elide(target, keep=1) >= limit:
+			self.ui.notice("The conversation is still near the context limit. Use /new or /compact between turns.")
 
 	def _elide(self, target: float, keep: int) -> int:
 		estimate = self.estimate_tokens()
@@ -182,11 +189,14 @@ class Agent:
 		for i in candidates[:max(0, len(candidates) - keep)]:
 			if estimate <= target:
 				break
-			estimate -= int((len(self.messages[i]["content"]) - len(ELIDED)) / ELIDED_CHARS_PER_TOKEN)
+			freed = int((len(self.messages[i]["content"]) - len(ELIDED)) / ELIDED_CHARS_PER_TOKEN)
 			self.messages[i]["content"] = ELIDED
 			elided += 1
+			# Without a server count, the estimate is a character count, so count again.
+			estimate = estimate - freed if self.usage_tokens is not None else self.estimate_tokens()
 		if elided:
-			self.usage_tokens, self.usage_n = estimate, len(self.messages)
+			if self.usage_tokens is not None:
+				self.usage_tokens, self.usage_n = estimate, len(self.messages)
 			self.chat.save()
 			self.ui.notice(f"Elided {elided} old tool outputs (about {estimate:,} tokens now).")
 		return estimate
@@ -197,8 +207,9 @@ class Agent:
 			last_user = max((i for i, m in enumerate(self.messages) if m["role"] == "user"), default=0)
 		else:
 			last_user = len(self.messages)
-		if last_user <= 1:
-			self.ui.notice("Nothing before the current request to summarize.")
+		if all(m["role"] == "system" or _is_summary(m) for m in self.messages[:last_user]):
+			if not keep_current:
+				self.ui.notice("Nothing to summarize.")
 			return False
 		self.ui.notice("Summarizing earlier conversation...")
 		request = self.messages[:last_user] + [{"role": "user", "content": SUMMARY_REQUEST}]
@@ -219,6 +230,10 @@ class Agent:
 		self.chat.save()
 		self.ui.notice(f"Compacted earlier conversation into notes (about {self.estimate_tokens():,} tokens now).")
 		return True
+
+
+def _is_summary(m: dict) -> bool:
+	return m["role"] == "user" and (m.get("content") or "").startswith("[Compacted context]")
 
 
 def _chars(m: dict) -> int:
