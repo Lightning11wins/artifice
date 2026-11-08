@@ -61,7 +61,7 @@ python3 -m unittest discover -s tests -v
 
 ## Context
 
-The window size comes from the server. Past 75% of it, old tool outputs are replaced with a note (the newest six are kept) until the history is back under 50%. If that is not enough, the model writes notes on everything before the current request, and those notes replace it, labeled as possibly mistaken. After that, reasoning from the current request's earlier steps is dropped, and the newest output is replaced only when no reply would fit beside it. A message too long for the context on its own is replaced with a note, so the chat stays usable. `/compact` does the same for the whole chat.
+The window size comes from the server. Past 75% of it, old tool outputs are replaced with a note (the newest six are kept) until the history is back under 50%. If that is not enough, the model writes notes on everything before the current request (with messages too long to fit cut down), and those notes replace it, labeled as possibly mistaken. After that, reasoning from the current request's earlier steps is dropped, and the newest output is replaced only when no reply would fit beside it. A message too long for the context on its own is replaced with a note, so the chat stays usable. `/compact` does the same for the whole chat.
 
 ## Data
 

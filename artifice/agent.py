@@ -140,6 +140,22 @@ class Agent:
 		self.chat.save()
 		raise LLMError(f"Failed to send: the message is too long for the context ({len(content):,} characters).") from error
 
+	def _fit(self, history: list[dict]) -> list[dict]:
+		"""Cuts the longest messages in history down to one limit, so a summary request and its reply fit."""
+		budget = max(1000, int((self.context_length - SUMMARY_MAX_TOKENS - 1024) * self.bytes_per_token))
+		sizes = sorted(len((m.get("content") or "").encode()) for m in history)
+		rest = budget - sum(_bytes(m, reasoning=False) - len((m.get("content") or "").encode()) for m in history)
+		limit = None
+		for i, size in enumerate(sizes):
+			if size * (len(sizes) - i) > rest:
+				limit = max(0, rest) // (len(sizes) - i)
+				break
+			rest -= size
+		if limit is None:
+			return history
+		return [{**m, "content": _cut(m["content"], limit)} if len((m.get("content") or "").encode()) > limit else m
+			for m in history]
+
 	def _template_args(self) -> dict:
 		if self.settings.thinking is None:
 			return {}
@@ -285,12 +301,18 @@ class Agent:
 				self.ui.notice("Nothing to summarize.")
 			return False
 		self.ui.notice("Summarizing earlier conversation...")
-		request = self.messages[:last_user] + [{"role": "user", "content": SUMMARY_REQUEST}]
-		try:
-			reply, _ = self._generate(request, {"enable_thinking": False}, SUMMARY_MAX_TOKENS, display=False)
-		except LLMError as e:
-			self.ui.notice(f"Failed to summarize: {e}")
-			return False
+		for attempt in range(2):
+			request = self._fit(self.messages[:last_user]) + [{"role": "user", "content": SUMMARY_REQUEST}]
+			try:
+				reply, _ = self._generate(request, {"enable_thinking": False}, SUMMARY_MAX_TOKENS, display=False)
+				break
+			except LLMError as e:
+				if attempt == 0 and _is_overflow(e):
+					size = sum(_bytes(m, reasoning=False) for m in request)
+					self.bytes_per_token = max(0.5, min(self.bytes_per_token, size / self.context_length))
+					continue
+				self.ui.notice(f"Failed to summarize: {e}")
+				return False
 		notes = reply["content"].strip()
 		if reply.get("tool_calls"):
 			self.ui.notice("Failed to summarize: the model called a tool instead of writing notes.")
@@ -306,6 +328,16 @@ class Agent:
 		self.chat.save()
 		self.ui.notice(f"Compacted earlier conversation into notes (about {self.estimate_tokens():,} tokens now).")
 		return True
+
+
+def _cut(text: str, limit: int) -> str:
+	"""Keeps the head and tail of text, about limit UTF-8 bytes in all."""
+	data = text.encode()
+	if len(data) <= limit:
+		return text
+	head = data[:limit // 2].decode(errors="ignore")
+	tail = data[len(data) - limit // 2:].decode(errors="ignore")
+	return f"{head}\n[... {len(text) - len(head) - len(tail):,} characters cut to fit the context ...]\n{tail}"
 
 
 def _is_summary(m: dict) -> bool:
