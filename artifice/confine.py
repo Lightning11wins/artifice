@@ -155,6 +155,7 @@ def main() -> None:
 	fsize = resource.RLIM_INFINITY
 	argv_stdin = False
 	deadline = 0
+	cwd = None
 	while args and args[0] != "--":
 		if args[0] == "--argv-stdin":
 			argv_stdin, args = True, args[1:]
@@ -166,6 +167,8 @@ def main() -> None:
 			fsize = int(value)
 		elif flag == "--deadline":
 			deadline = int(value)
+		elif flag == "--chdir":
+			cwd = value
 		else:
 			fail(f"Failed to parse arguments: unknown flag {flag}")
 	if argv_stdin:
@@ -178,6 +181,11 @@ def main() -> None:
 	if not command or not all(isinstance(a, str) for a in command):
 		fail(f"Failed to parse arguments: bad command {command!r}")
 
+	if cwd is not None:
+		try:
+			os.chdir(cwd)
+		except OSError as e:
+			fail(f"Failed to enter {cwd}: {e.strerror}")
 	resource.setrlimit(resource.RLIMIT_FSIZE, (fsize, fsize))
 	if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
 		fail(f"Failed to set no_new_privs (errno {ctypes.get_errno()})")
@@ -203,7 +211,14 @@ def supervise(deadline: int) -> None:
 	"""
 	pid = os.fork()
 	if pid == 0:
+		os.setpgid(0, 0)  # so the command's kill(0, ...) does not reach the supervisor
 		return
+	try:
+		os.setpgid(pid, pid)
+	except OSError:
+		pass  # the child got there first, or already exited
+	for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM):
+		signal.signal(signum, signal.SIG_IGN)
 
 	def expire(signum, frame):
 		os.kill(pid, signal.SIGKILL)

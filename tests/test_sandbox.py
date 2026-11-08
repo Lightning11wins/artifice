@@ -383,6 +383,42 @@ Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(["sleep"
 			"yes | head -1 > /dev/null; echo ${PIPESTATUS[0]}"])
 		self.assertRegex(r.output, r"(?m)^153\n1048576\n141$")
 
+	def test_host_mounts_made_during_a_command_stay_out(self):
+		# Landlock does not cover chmod, chown, utime or xattrs, so a writable host mount must not appear.
+		base = Path(tempfile.mkdtemp(dir=HOST_DIR))
+		mnt = base / "mnt"
+		mnt.mkdir()
+		results = []
+		sb = Sandbox(READ_ONLY, self.scratch, str(base))
+		worker = threading.Thread(target=lambda: results.append(sb.run(["bash", "-c",
+			"sleep 3; chmod 600 mnt/f; touch -d 2000-01-01 mnt/f; ls mnt"])))
+		worker.start()
+		time.sleep(1)
+		subprocess.run(["sudo", "-n", "mount", "-t", "tmpfs", "-o", "mode=777,size=1m", "artifice-test", str(mnt)], check=True)
+		self.addCleanup(subprocess.run, ["sudo", "-n", "umount", str(mnt)])
+		(mnt / "f").write_text("x")
+		(mnt / "f").chmod(0o644)
+		worker.join(30)
+		st = (mnt / "f").stat()
+		self.assertEqual(st.st_mode & 0o777, 0o644, results[0].output)
+		self.assertGreater(st.st_mtime, time.time() - 60)
+
+	def test_cwd_on_a_fuse_mount_root_cannot_enter(self):
+		doc = f"/run/user/{os.getuid()}/doc"
+		if not os.path.ismount(doc) or subprocess.run(["sudo", "-n", "test", "-x", doc]).returncode == 0:
+			self.skipTest(f"{doc} is not a FUSE mount that root cannot enter")
+		r = Sandbox(READ_ONLY, self.scratch, doc).run(["pwd"])
+		self.assertEqual(r.output.strip(), doc)
+
+	def test_signals_to_the_process_group_stay_in_the_command(self):
+		code = ("import os, signal\n"
+			"for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):\n"
+			"    signal.signal(s, signal.SIG_IGN)\n"
+			"    os.kill(0, s)\n"
+			"print('survived')")
+		r = self.sb.run(["python3", "-c", code])
+		self.assertEqual((r.output, r.exit_code), ("survived\n", 0))
+
 	def test_negative_timeout_is_clamped(self):
 		r = self.sh("sleep 0.2; echo done", timeout=-5)
 		self.assertFalse(r.timed_out)
@@ -518,7 +554,7 @@ Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(["sleep"
 				fds = [os.open(root, os.O_RDONLY)] + ([os.open(scratch, os.O_RDONLY)] if lock_chat else [])
 				for fd in fds:
 					fcntl.flock(fd, fcntl.LOCK_EX)
-				threading.Timer(0.5, lambda: [os.close(fd) for fd in fds]).start()
+				threading.Timer(0.5, lambda: [os.close(fd) for fd in reversed(fds)]).start()  # chat first, as cleanup does
 				start = time.monotonic()
 				Sandbox(READ_ONLY, scratch, str(self.host), exclusive=True)
 				self.assertGreater(time.monotonic() - start, 0.4)

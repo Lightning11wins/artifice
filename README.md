@@ -14,7 +14,7 @@ bin/artifice -p "question"            # one-shot: answer to stdout, trace to std
 
 The server address comes from `--host`/`--port`, else `$LLM_HOST`/`$LLM_PORT`, else `localhost:8741`. Type `/help` in a chat for commands.
 
-Needs Python 3.12+, `sudo`, `setpriv` (util-linux), `bwrap` (package `bubblewrap`) and, optionally, `rg` (package `ripgrep`). Artifice offers to install `bwrap` and `rg` with `apt` or `dnf` when they are missing.
+Needs Python 3.12+, `sudo`, `setpriv` and `unshare` (util-linux), `bwrap` (package `bubblewrap`) and, optionally, `rg` (package `ripgrep`). Artifice offers to install `bwrap` and `rg` with `apt` or `dnf` when they are missing.
 
 Artifice asks for your sudo password once per session (when sudo's ticket expires, it asks again), because the sandbox starts as root to grant the model read access to every file. See below.
 
@@ -32,7 +32,7 @@ Each tool call runs in its own sandbox. Output over 30,000 characters is cut dow
 
 ## Sandbox
 
-Every tool call runs as `sudo`, then `systemd-run --scope` (memory and task limits, when systemd runs), then `bwrap`, then `setpriv`, then `confine.py`, then the command.
+Every tool call runs as `sudo`, then `systemd-run --scope` (memory and task limits, when systemd runs), then `bwrap`, then `unshare`, then `setpriv`, then `confine.py`, then the command.
 
 - **sudo bwrap** starts as root without a user namespace, so the capability it keeps is real on the host. It makes:
   - a read-only bind of `/` at the same paths;
@@ -43,6 +43,7 @@ Every tool call runs as `sudo`, then `systemd-run --scope` (memory and task limi
   `/tmp` is the chat's scratch directory, `~/.local/share/artifice/scratch/<chat>`, so the host's `/tmp` is hidden. A chat started under `/tmp` or `/dev` starts in your home directory instead. Scratch is writable and persists for the chat. At startup, Artifice deletes files that have not changed in 48 hours, and then empty directories, from chats that are not open.
 
   The command to run reaches the sandbox on stdin, so sudo logs only the fixed sandbox command line, not what the model ran.
+- **unshare** makes the mounts private, so a mount the host adds later, such as a USB drive, never appears in the sandbox without the read-only flag.
 - **setpriv** drops to your uid, gid and groups and keeps only `CAP_DAC_READ_SEARCH`. That capability lets the model read every file, root-only ones included, and nothing else.
 - **confine.py** closes what a read-only mount and that capability leave open:
   - Landlock allows writes only under `/tmp` and the private `/dev`, which blocks writing into FIFOs on the host filesystem. Its ptrace scoping also hides `/proc/PID/environ`, `fd` and `maps` of host processes.

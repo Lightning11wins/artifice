@@ -66,6 +66,7 @@ class Sandbox:
 		self.notify = notify or (lambda text: print(text, file=sys.stderr))
 		self.bwrap = shutil.which("bwrap") or "bwrap"
 		self.setpriv = shutil.which("setpriv") or "setpriv"
+		self.unshare = shutil.which("unshare") or "unshare"
 		self._systemd = shutil.which("systemd-run") is not None and os.path.isdir("/run/systemd/system")
 		self._passwordless = False
 		self._lock = self._lock_scratch(exclusive)
@@ -142,11 +143,12 @@ class Sandbox:
 		]
 		for key, value in env.items():
 			cmd += ["--setenv", key, value]
-		for cap in ("CAP_DAC_READ_SEARCH", "CAP_SETUID", "CAP_SETGID", "CAP_SETPCAP"):
+		for cap in ("CAP_DAC_READ_SEARCH", "CAP_SETUID", "CAP_SETGID", "CAP_SETPCAP", "CAP_SYS_ADMIN"):
 			cmd += ["--cap-add", cap]
 		cwd = self.cwd if os.path.isdir(self.cwd) and not hidden_in_sandbox(self.cwd) else home
 		groups = os.getgroups()
-		cmd += ["--chdir", cwd, "--"]
+		# bwrap's mounts receive the host's new mounts, without the read-only flag. A private mount namespace does not.
+		cmd += ["--chdir", "/", "--", self.unshare, "--mount", "--propagation", "private", "--"]
 		cmd += [
 			self.setpriv, f"--reuid={os.getuid()}", f"--regid={os.getgid()}",
 			f"--groups={','.join(map(str, groups))}" if groups else "--clear-groups",
@@ -155,7 +157,8 @@ class Sandbox:
 			"--bounding-set=-all,+dac_read_search",
 			"--",
 		]
-		cmd += [sys.executable, "-I", "-S", CONFINE, "--write", "/tmp", "--write", "/dev"]
+		# confine.py enters cwd as the user, who can enter FUSE mounts that root cannot.
+		cmd += [sys.executable, "-I", "-S", CONFINE, "--chdir", cwd, "--write", "/tmp", "--write", "/dev"]
 		cmd += ["--fsize", str(self.profile.file_size_max), "--argv-stdin"]
 		if deadline:
 			cmd += ["--deadline", str(deadline)]
@@ -249,7 +252,7 @@ class Sandbox:
 
 	def check(self) -> None:
 		"""Raises SandboxError with a diagnosis when the sandbox cannot start."""
-		for tool, package in (("bwrap", "bubblewrap"), ("setpriv", "util-linux"), ("sudo", "sudo")):
+		for tool, package in (("bwrap", "bubblewrap"), ("setpriv", "util-linux"), ("unshare", "util-linux"), ("sudo", "sudo")):
 			if not shutil.which(tool):
 				raise SandboxError(f"Failed to find {tool} (package: {package})")
 		for path in (sys.executable, CONFINE):
