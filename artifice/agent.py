@@ -254,6 +254,9 @@ class Agent:
 			self.ui.notice(f"Failed to summarize: {e}")
 			return False
 		notes = reply["content"].strip()
+		if reply.get("tool_calls"):
+			self.ui.notice("Failed to summarize: the model called a tool instead of writing notes.")
+			return False
 		if not notes:
 			self.ui.notice("Failed to summarize: the model returned no notes.")
 			return False

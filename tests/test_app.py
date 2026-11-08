@@ -121,6 +121,21 @@ class AgentTest(TempDataTest):
 		self.assertLess(agent.estimate_tokens(), 32768)
 		self.assertGreater(min(client.max_tokens), 256)
 
+	def test_a_summary_that_calls_a_tool_is_not_kept(self):
+		class PreambleClient(FakeClient):
+			def stream(self, body):
+				if body["messages"][-1]["content"].startswith("Stop here."):
+					yield {"token": "Let me check the config first."}
+					yield {"tool_calls": [{"id": "s", "type": "function",
+						"function": {"name": "read_file", "arguments": '{"path": "x"}'}}]}
+					return
+				yield from super().stream(body)
+
+		chat = self.chat(("user", "find the bug"), ("assistant", "The bug is at foo.c:42."))
+		agent = Agent(PreambleClient(), chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=32768)
+		self.assertFalse(agent.maybe_compact(force=True))
+		self.assertIn("The bug is at foo.c:42.", [m.get("content") for m in agent.messages])
+
 	def test_null_usage_values(self):
 		client = FakeClient(usage={"prompt_tokens": None, "completion_tokens": None})
 		agent = Agent(client, self.chat(), FakeTools(), Settings(model="m"), QuietUI(), context_length=32768)
@@ -461,31 +476,39 @@ class GlobFallbackTest(unittest.TestCase):
 		def run(argv, timeout=None, **kw):
 			p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
 			try:
-				out, _ = p.communicate(timeout=2)
+				out, _ = p.communicate(timeout=3)
 				return Result(output=out.decode(), exit_code=p.returncode)
 			except subprocess.TimeoutExpired:
 				os.killpg(p.pid, signal.SIGKILL)  # what Sandbox.run does at the timeout
 				out, _ = p.communicate()
 				return Result(output=out.decode(), exit_code=None, timed_out=True)
 
-		with tempfile.TemporaryDirectory() as d:
+		with tempfile.TemporaryDirectory() as bin_dir, tempfile.TemporaryDirectory() as d:
 			# A search that finds a match and then stalls, as on a slow mount or a blocking file.
-			stub = Path(d, "rg")
-			stub.write_text('#!/bin/bash\nfor a; do [ "$a" = --files ] && echo ./a.txt; done\necho ./a.txt:1:needle\nsleep 30\n')
-			stub.chmod(0o755)
-			fifo = os.path.join(d, "fifo")
-			os.mkfifo(fifo)
-			stall = Path(d, "grep")
-			stall.write_text(f'#!/bin/bash\nexec {shutil.which("grep")} "$@" {fifo}\n')  # blocks opening the FIFO
-			stall.chmod(0o755)
 			Path(d, "a.txt").write_text("needle\n")
-			for rg in (str(stub), None):
-				with self.subTest(rg=rg), mock.patch.dict(os.environ, {"PATH": f"{d}:{os.environ['PATH']}"}):
+			Path(d, "b.txt").write_text("needle\n")
+			fifo = os.path.join(bin_dir, "fifo")
+			os.mkfifo(fifo)
+			slow = Path(bin_dir, "slow")
+			slow.write_text('#!/bin/bash\ncase "$1" in *b.txt) sleep 30;; esac; cat\n')
+			stub = Path(bin_dir, "rg")
+			stub.write_text(f'#!/bin/bash\nexec {shutil.which("rg")} --pre {slow} "$@"\n')
+			linger = Path(bin_dir, "rg-linger")  # rg --files reads no files, so this stalls after it instead
+			linger.write_text(f'#!/bin/bash\n{shutil.which("rg")} "$@"; sleep 30\n')
+			stall = Path(bin_dir, "grep")
+			stall.write_text(f'#!/bin/bash\nexec {shutil.which("grep")} "$@" {fifo}\n')  # blocks opening the FIFO
+			for script in (slow, stub, linger, stall):
+				script.chmod(0o755)
+			cases = [(None, "grep_search", {"pattern": "needle", "path": d}, f"{d}/a.txt:1:needle")]
+			if shutil.which("rg"):
+				cases += [(str(stub), "grep_search", {"pattern": "needle", "path": d}, f"{d}/a.txt:1:needle"),
+					(str(linger), "glob", {"pattern": "*.txt", "path": d}, f"{d}/a.txt")]
+			for rg, tool, args, expected in cases:
+				with self.subTest(rg=rg, tool=tool), mock.patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"}):
 					with mock.patch.object(tools.shutil, "which", return_value=rg):
 						t = tools.Tools(mock.Mock())
 					t.sandbox.run.side_effect = run
-					out = t.call("grep_search", json.dumps({"pattern": "needle", "path": d})).text
-					self.assertIn("a.txt:1:needle", out)
+					self.assertIn(expected, t.call(tool, json.dumps(args)).text)
 
 	def test_schemas_without_rg_do_not_offer_gitignore(self):
 		from artifice.tools import schemas
