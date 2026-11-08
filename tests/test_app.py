@@ -151,6 +151,25 @@ class OpenChatTest(TempDataTest):
 		self.assertEqual((app.settings.model, app.loaded, app.context_length), ("good", "good", 2000))
 
 
+	def test_resuming_the_open_chat_keeps_its_sandbox(self):
+		app = self.app()
+		chat = Chat.new("good", "read-only", "/")
+		with mock.patch.object(cli, "Sandbox") as sandbox:
+			app.open_chat(chat)
+			app.open_chat(chat)
+		self.assertEqual(sandbox.call_count, 1)
+
+	def test_new_chat_in_a_deleted_directory_starts_at_home(self):
+		app = self.app()
+		app.ui = QuietUI()
+		gone = tempfile.mkdtemp()
+		here = os.getcwd()
+		self.addCleanup(os.chdir, here)
+		os.chdir(gone)
+		os.rmdir(gone)
+		self.assertEqual(app.new_chat().cwd, str(Path.home()))
+
+
 class CommandTest(TempDataTest):
 	def test_paths_are_messages(self):
 		self.assertTrue(cli.is_command("/resume 2026"))

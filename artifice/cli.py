@@ -187,14 +187,24 @@ class App:
 		"""Switches to chat. On failure, the current chat and its settings are unchanged."""
 		model = self.args.model or chat.model
 		context_length = self.context_length if model == self.loaded else self.load_model(model)
-		sandbox = Sandbox(READ_ONLY, scratch_root() / chat.id, chat.cwd, notify=self.ui.notice)
+		current = self.agent
+		if current and current.chat.id == chat.id:
+			sandbox = current.tools.sandbox  # this session already holds the chat's lock
+		else:
+			sandbox = Sandbox(READ_ONLY, scratch_root() / chat.id, chat.cwd, notify=self.ui.notice, exclusive=True)
 		sandbox.check()
 		self.loaded, self.context_length = model, context_length
 		self.settings.model = chat.model = model
 		self.agent = Agent(self.client, chat, Tools(sandbox), self.settings, self.ui, self.context_length)
+		if current and current.tools.sandbox is not sandbox:
+			current.tools.sandbox.close()
 
 	def new_chat(self) -> Chat:
-		cwd = os.getcwd()
+		try:
+			cwd = os.getcwd()
+		except FileNotFoundError:
+			cwd = str(Path.home())
+			self.ui.notice(f"The current directory was deleted, so the chat starts in {cwd}.")
 		if hidden_by_scratch(cwd):
 			cwd = str(Path.home())
 			self.ui.notice(f"The sandbox replaces /tmp with scratch, so the chat starts in {cwd} instead.")

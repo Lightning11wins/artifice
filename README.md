@@ -1,6 +1,6 @@
 # Artifice
 
-A terminal chat harness for local models served by [llm-server](../llm-server). The model can read any file and run commands, but the operating system stops it from changing anything.
+A terminal chat harness for local models served by [llm-server](../llm-server). The model can read any file and run commands, but the operating system stops it from writing anything outside its scratch directory.
 
 ## Run
 
@@ -50,6 +50,7 @@ Every tool call runs as `sudo`, then `systemd-run --scope` (memory and task limi
   - `no_new_privs` stops sudo and setuid binaries.
 - Limits: 120 s default timeout (600 s max), 8 GiB of memory without swap and 512 tasks, 1 GiB per written file, 4 GiB and 100,000 entries in scratch, 1 MiB of output kept per command.
 - Scratch limits are checked every second while a command runs and when it exits, and a directory Artifice cannot read counts as full. A command that finishes within a second can overshoot them; while scratch is over, later commands are killed after a second until the model deletes files. A hard cap would need a disk quota or a dedicated filesystem.
+- Reading still has effects that a read-only sandbox cannot stop. Reading a FIFO takes data meant for its reader, reading `/sys/kernel/tracing/trace_pipe` drains the kernel trace buffer, and a lock taken on a read-only file, such as dpkg's or rpm's lock, makes host programs wait for it until the command ends or times out.
 
 The escape tests in `tests/test_sandbox.py` try each of these and must all fail to change anything. `tests/test_app.py` covers the agent loop and CLI with a fake server. The escape tests need sudo without a password prompt, so run `sudo -v` first, and run them outside any other sandbox:
 
@@ -63,7 +64,7 @@ The window size comes from the server. Past 75% of it, old tool outputs are repl
 
 ## Data
 
-Chats are saved as JSON in `~/.local/share/artifice/chats/`, mode 0600 in a 0700 directory. They contain everything the model read, so treat them as sensitive.
+Chats are saved as JSON in `~/.local/share/artifice/chats/`, mode 0600 in a 0700 directory. They contain everything the model read, so treat them as sensitive. A chat can be open in one Artifice session at a time.
 
 ## License
 

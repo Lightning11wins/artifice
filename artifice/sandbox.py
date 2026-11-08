@@ -56,7 +56,8 @@ class SandboxError(Exception):
 
 
 class Sandbox:
-	def __init__(self, profile: Profile, scratch: Path, cwd: str, notify: Callable[[str], None] | None = None):
+	def __init__(self, profile: Profile, scratch: Path, cwd: str, notify: Callable[[str], None] | None = None,
+			exclusive: bool = False):
 		self.profile = profile
 		self.scratch = scratch
 		self.cwd = cwd
@@ -65,15 +66,22 @@ class Sandbox:
 		self.setpriv = shutil.which("setpriv") or "setpriv"
 		self._systemd = shutil.which("systemd-run") is not None and os.path.isdir("/run/systemd/system")
 		self._passwordless = False
-		self._lock = self._lock_scratch()
-		weakref.finalize(self, os.close, self._lock)
+		self._lock = self._lock_scratch(exclusive)
+		self.close = weakref.finalize(self, os.close, self._lock)  # releases the lock early; dropping the sandbox does too
 
-	def _lock_scratch(self) -> int:
-		"""Holds a shared lock on the scratch directory, so clean_scratch skips it while this chat is open."""
+	def _lock_scratch(self, exclusive: bool) -> int:
+		"""Locks the scratch directory, so clean_scratch skips it while this chat is open.
+
+		An exclusive lock also keeps a second Artifice session out of the chat.
+		"""
 		for _ in range(3):
 			self.scratch.mkdir(mode=0o700, parents=True, exist_ok=True)
 			fd = os.open(self.scratch, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-			fcntl.flock(fd, fcntl.LOCK_SH)
+			try:
+				fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB if exclusive else fcntl.LOCK_SH)
+			except BlockingIOError:
+				os.close(fd)
+				raise SandboxError(f"Failed to open chat {self.scratch.name}: another Artifice session has it open.")
 			try:
 				if os.path.samestat(os.fstat(fd), os.lstat(self.scratch)):
 					return fd
@@ -280,7 +288,7 @@ def clean_scratch(root: Path, max_age: int = SCRATCH_MAX_AGE) -> None:
 		root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
 	except OSError:
 		return
-	# fwalk holds a descriptor per directory level, and scratch trees can be deep.
+	# The walk holds a descriptor per directory level, and scratch trees can be deep.
 	soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
 	if hard == resource.RLIM_INFINITY or hard > soft:
 		resource.setrlimit(resource.RLIMIT_NOFILE, (min(hard, 1 << 20), hard))
@@ -304,23 +312,41 @@ def clean_scratch(root: Path, max_age: int = SCRATCH_MAX_AGE) -> None:
 
 
 def _clean_dir(top_fd: int, cutoff: float) -> None:
+	"""Deletes old files and then empty directories under top_fd, without following symlinks.
+
+	The walk keeps its own stack because scratch trees can be thousands of levels deep.
+	"""
 	# Directories need owner write and search for their entries to be deleted.
 	os.fchmod(top_fd, os.fstat(top_fd).st_mode | 0o700)
-	for _path, dirnames, _files, dir_fd in os.fwalk(".", dir_fd=top_fd, follow_symlinks=False):
-		for name in dirnames:
-			try:
-				st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-				if stat.S_ISDIR(st.st_mode) and st.st_mode & 0o700 != 0o700:
-					os.chmod(name, st.st_mode | 0o700, dir_fd=dir_fd)
-			except OSError:
-				pass
-	for _path, dirnames, filenames, dir_fd in os.fwalk(".", dir_fd=top_fd, topdown=False, follow_symlinks=False):
-		for name in filenames + dirnames:
+	stack = [(top_fd, iter(os.listdir(top_fd)), "")]
+	try:
+		while stack:
+			dir_fd, names, dir_name = stack[-1]
+			name = next(names, None)
+			if name is None:
+				stack.pop()
+				if stack:
+					os.close(dir_fd)
+					try:
+						os.rmdir(dir_name, dir_fd=stack[-1][0])
+					except OSError:
+						pass
+				continue
 			try:
 				st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
 				if stat.S_ISDIR(st.st_mode):
-					os.rmdir(name, dir_fd=dir_fd)
+					if st.st_mode & 0o700 != 0o700:
+						os.chmod(name, st.st_mode | 0o700, dir_fd=dir_fd)
+					fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+					try:
+						stack.append((fd, iter(os.listdir(fd)), name))
+					except OSError:
+						os.close(fd)
+						raise
 				elif max(st.st_mtime, st.st_ctime) < cutoff:
 					os.unlink(name, dir_fd=dir_fd)
 			except OSError:
 				pass
+	finally:
+		for fd, _names, _name in stack[1:]:
+			os.close(fd)

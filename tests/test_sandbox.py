@@ -418,13 +418,22 @@ Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(["sleep"
 		outside.unlink()
 
 	def test_clean_scratch_handles_deep_trees_with_a_low_fd_limit(self):
+		# Deeper than Python's recursion limit, which recursive walks such as os.fwalk before 3.12.4 hit.
 		root = Path(tempfile.mkdtemp(dir=HOST_DIR, prefix="clean-"))
-		subprocess.run(["bash", "-c", f"cd {root} && mkdir chat && cd chat && for i in $(seq 200); do mkdir d && cd d; done && echo x > f"],
+		subprocess.run(["bash", "-c", f"cd {root} && mkdir chat && cd chat && for i in $(seq 1500); do mkdir d && cd d; done && echo x > f"],
 			check=True)
 		code = f"import sys; sys.path.insert(0, {str(Path(__file__).resolve().parent.parent)!r}); " \
 			f"from artifice.sandbox import clean_scratch; clean_scratch(__import__('pathlib').Path({str(root)!r}), max_age=-60)"
 		subprocess.run(["bash", "-c", f"ulimit -Sn 64 && {sys.executable} -I -c \"{code}\""], check=True)
 		self.assertFalse((root / "chat").exists())
+
+	def test_a_chat_opens_in_one_session_at_a_time(self):
+		scratch = Path(tempfile.mkdtemp(dir=HOST_DIR, prefix="scratch-"))
+		first = Sandbox(READ_ONLY, scratch, str(self.host), exclusive=True)
+		with self.assertRaisesRegex(SandboxError, "another Artifice session"):
+			Sandbox(READ_ONLY, scratch, str(self.host), exclusive=True)
+		first.close()
+		Sandbox(READ_ONLY, scratch, str(self.host), exclusive=True)
 
 	def test_clean_scratch_enters_read_only_directories(self):
 		root = Path(tempfile.mkdtemp(dir=HOST_DIR, prefix="clean-"))
