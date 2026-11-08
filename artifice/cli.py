@@ -322,6 +322,7 @@ class App:
 def main() -> None:
 	for stream in (sys.stdout, sys.stderr):
 		stream.reconfigure(errors="backslashreplace")
+	sys.stdin.reconfigure(errors="replace")
 	exit_on_sigterm()
 	try:
 		_main()

@@ -171,7 +171,7 @@ class Tools:
 			if include_ignored:
 				argv.append("--no-ignore")
 		else:
-			argv = ["grep", "-rnE", "--binary-files=without-match", "--exclude-dir=.git"]
+			argv = ["grep", "-rnHE", "--binary-files=without-match", "--exclude-dir=.git"]
 			if include:
 				argv.append(f"--include={include}")
 		if ignore_case:

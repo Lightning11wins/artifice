@@ -3,9 +3,11 @@
 Run with: python3 -m unittest discover -s tests -v
 """
 import argparse
+import io
 import json
 import os
 import signal
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -416,6 +418,17 @@ class GlobFallbackTest(unittest.TestCase):
 		globs = [argv[argv.index("-g") + 1] for (argv,), _ in t.sandbox.run.call_args_list]
 		self.assertEqual(globs, ["src/**/*.py", "*.py"])
 
+	def test_grep_fallback_names_a_single_file(self):
+		with mock.patch.object(tools.shutil, "which", return_value=None):
+			t = tools.Tools(mock.Mock())
+		run = lambda argv, **kw: Result(output=subprocess.run(argv, capture_output=True, text=True).stdout, exit_code=0)
+		t.sandbox.run.side_effect = run
+		with tempfile.NamedTemporaryFile("w", suffix=".txt") as f:
+			f.write("a\nneedle\n")
+			f.flush()
+			out = t.call("grep_search", json.dumps({"pattern": "needle", "path": f.name}))
+		self.assertIn(f"{f.name}:2:needle", out.text)
+
 	def test_schemas_without_rg_do_not_offer_gitignore(self):
 		from artifice.tools import schemas
 		text = str(schemas(False))
@@ -438,6 +451,13 @@ class ReadFileTest(unittest.TestCase):
 		self.assertLessEqual(len(text), tools.OUTPUT_MAX_CHARS)
 		last = int(text.split("Use offset=")[1].split(" ")[0]) - 1
 		self.assertEqual(text.count("x" * 1999), last)
+
+
+class MainTest(unittest.TestCase):
+	def test_undecodable_input_does_not_crash(self):
+		stdin = io.TextIOWrapper(io.BytesIO(b"hi\xff\n"), encoding="utf-8")
+		with mock.patch.object(sys, "stdin", stdin), mock.patch.object(cli, "_main", lambda: print(input(), file=io.StringIO())):
+			cli.main()
 
 
 class ClientTest(unittest.TestCase):
