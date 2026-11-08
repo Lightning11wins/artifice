@@ -120,7 +120,8 @@ class Sandbox:
 			"PYTHONDONTWRITEBYTECODE": "1",
 		}
 		# timeout runs as root outside the sandbox, so it ends the sandbox even if Artifice was killed.
-		# It dies with sudo, and bwrap dies with it through --die-with-parent.
+		# It dies with its parent, sudo or, under use_pty, sudo's monitor process, which kills it when sudo dies.
+		# bwrap dies with it through --die-with-parent.
 		cmd = ["sudo", "-n", self.setpriv, "--pdeathsig", "KILL", self.timeout, "--foreground", "-s", "KILL", str(deadline)]
 		if self._systemd:
 			# A system scope, because sudo's PAM session can move it out of a user scope.
@@ -239,7 +240,7 @@ class Sandbox:
 		finally:
 			sel.close()
 			if proc.poll() is None:
-				# Killing sudo kills timeout, then bwrap, and with it the PID namespace.
+				# Killing sudo kills timeout, directly or through sudo's monitor, then bwrap and its PID namespace.
 				try:
 					os.kill(proc.pid, signal.SIGKILL)
 				except ProcessLookupError:

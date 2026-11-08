@@ -7,6 +7,7 @@ import ctypes
 import fcntl
 import json
 import os
+import shlex
 import shutil
 import signal
 import socket
@@ -271,13 +272,16 @@ print("ok")
 
 	def test_blocked_syscalls(self):
 		code = ("import ctypes, platform; libc = ctypes.CDLL(None, use_errno=True); "
-			"nr = {'x86_64': {'uring': 425, 'keyctl': 250, 'handle': 304}, "
-			"'aarch64': {'uring': 425, 'keyctl': 219, 'handle': 265}}[platform.machine()]; "
+			"nr = {'x86_64': {'uring': 425, 'add_key': 248, 'request_key': 249, 'keyctl': 250, 'handle': 304}, "
+			"'aarch64': {'uring': 425, 'add_key': 217, 'request_key': 218, 'keyctl': 219, 'handle': 265}}"
+			"[platform.machine()]; "
 			"buf = ctypes.create_string_buffer(128); "
-			"calls = [(nr['uring'], 8, buf), (nr['keyctl'], 0, -4, 0), (nr['handle'], -100, buf, 0)]; "
-			"print(*[(libc.syscall(*c), ctypes.get_errno())[1] for c in calls])")
+			"calls = [(nr['uring'], 8, buf), (nr['add_key'], b'user', b'artifice', b'x', 1, -3), "
+			"(nr['request_key'], b'user', b'artifice', None, -3), (nr['keyctl'], 0, -4, 0), "
+			"(nr['handle'], -100, buf, 0)]; "
+			"print(*[(ctypes.set_errno(0), f'{libc.syscall(*c)}/{ctypes.get_errno()}')[1] for c in calls])")
 		r = self.py(code)
-		self.assertEqual(r.output.split(), ["38", "38", "38"], r.output)  # ENOSYS from seccomp
+		self.assertEqual(r.output.split(), ["-1/38"] * 5, r.output)  # ENOSYS from seccomp
 
 	def test_memory_and_task_limits(self):
 		sb = Sandbox(Profile(name="small", memory_max="64M", tasks_max=32), self.scratch, str(self.host))
@@ -378,6 +382,32 @@ Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(
 				break
 			time.sleep(0.5)
 		self.assertEqual(left, "")
+
+	def test_a_killed_command_is_gone_when_run_returns(self):
+		# In a terminal, sudo's use_pty puts a monitor process between sudo and the sandbox.
+		root = Path(__file__).resolve().parent.parent
+		code = f"""
+import os, sys
+sys.path.insert(0, {str(root)!r})
+from pathlib import Path
+from artifice.sandbox import READ_ONLY, Sandbox
+Sandbox.scratch_full = lambda self: False  # so nothing delays the check below
+Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(["sleep", "4297"], timeout=1)
+left = []
+for pid in filter(str.isdigit, os.listdir("/proc")):
+	try:
+		if Path(f"/proc/{{pid}}/cmdline").read_bytes() == b"sleep\\x004297\\x00":
+			left.append(pid)
+	except OSError:
+		pass
+print("left:", left)
+"""
+		argv = [sys.executable, "-I", "-c", code]
+		for terminal in (False, True):
+			with self.subTest(terminal=terminal):
+				r = subprocess.run(["script", "-qec", shlex.join(argv), "/dev/null"] if terminal else argv,
+					stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+				self.assertIn("left: []", r.stdout, r.stdout + r.stderr)
 
 	def test_file_size_limit_and_default_signals(self):
 		sb = Sandbox(Profile(name="small", file_size_max=1 << 20), self.scratch, str(self.host))
