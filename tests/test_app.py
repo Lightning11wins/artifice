@@ -263,18 +263,20 @@ class AgentTest(TempDataTest):
 					text += "".join(m.get("reasoning_content") or "" for m in body["messages"][2:])
 					if len(text) / 4 > self.limit:
 						raise LLMError("Failed to generate: the request exceeds the available context size")
+					steps = [m for m in body["messages"][4:] if m["role"] == "assistant"]
+					self.newest_kept.append(not steps or "reasoning_content" in steps[-1])
 					yield {"reasoning": "r" * 6000}
 				yield from FakeClient.stream(self, body)
 
 		for usage in (None, {"prompt_tokens": 100, "completion_tokens": 100}):
 			with self.subTest(usage=usage):
 				client = ThinkingClient(limit=32768)
-				client.calls, client.usage = 40, usage
+				client.calls, client.usage, client.newest_kept = 40, usage, []
 				agent = Agent(client, self.chat(("user", "earlier"), ("assistant", "ok")), FakeTools(output="ok"),
 					Settings(model="m"), QuietUI(), context_length=32768)
 				agent.send("go")
 				self.assertEqual(agent.messages[-1]["content"], "done")
-				self.assertIn("reasoning_content", agent.messages[-1])
+				self.assertTrue(all(client.newest_kept))
 				self.assertGreater(min(client.max_tokens), 256)
 
 
