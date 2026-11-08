@@ -9,11 +9,12 @@ from . import deps
 from .agent import Agent, Settings
 from .client import LLMClient, LLMError
 from .prompt import system_prompt
-from .sandbox import READ_ONLY, Sandbox, SandboxError, clean_scratch
+from .sandbox import READ_ONLY, Sandbox, SandboxError, clean_scratch, hidden_by_scratch
 from .store import Chat, data_dir, list_chats, scratch_root
 from .tools import ToolResult, Tools, describe_call
 
 DEFAULT_MODEL = "qwen3.6-35b-a3b"
+FALLBACK_CONTEXT = 32768
 HELP = """Commands:
   /new              start a new chat
   /chats            list recent chats
@@ -130,23 +131,33 @@ class App:
 		one_shot = args.prompt is not None
 		self.ui = TerminalUI(answer_out=sys.stdout, trace_out=sys.stderr if one_shot else sys.stdout)
 		self.context_length = 0
+		self.loaded: str | None = None
 		self.agent: Agent | None = None
 
 	def load_model(self) -> None:
 		self.ui.notice(f"Loading {self.settings.model} from {self.args.host}:{self.args.port}...")
 		info = self.client.load(self.settings.model, self.settings.ttl)
-		self.context_length = info["context_length"]
+		self.context_length = info.get("context_length") or 0
+		if not self.context_length:
+			self.context_length = FALLBACK_CONTEXT
+			self.ui.notice(f"The server did not report a context length. Assuming {FALLBACK_CONTEXT:,} tokens.")
+		self.loaded = self.settings.model
 
 	def open_chat(self, chat: Chat) -> None:
 		if self.args.model is None:
 			self.settings.model = chat.model
 		chat.model = self.settings.model
+		if self.loaded != self.settings.model:
+			self.load_model()
 		sandbox = Sandbox(READ_ONLY, scratch_root() / chat.id, chat.cwd, notify=self.ui.notice)
 		sandbox.check()
 		self.agent = Agent(self.client, chat, Tools(sandbox), self.settings, self.ui, self.context_length)
 
 	def new_chat(self) -> Chat:
 		cwd = os.getcwd()
+		if hidden_by_scratch(cwd):
+			cwd = str(Path.home())
+			self.ui.notice(f"The sandbox replaces /tmp with scratch, so the chat starts in {cwd} instead.")
 		chat = Chat.new(self.settings.model, READ_ONLY.name, cwd)
 		chat.messages.append({"role": "system", "content": system_prompt(cwd, READ_ONLY.name)})
 		return chat
@@ -173,7 +184,7 @@ class App:
 		elif name == "resume":
 			try:
 				self.open_chat(Chat.load(arg))
-			except FileNotFoundError as e:
+			except (FileNotFoundError, ValueError, LLMError) as e:
 				self.ui.notice(str(e))
 				return True
 			self.banner()
@@ -221,8 +232,10 @@ class App:
 					try:
 						if not self.command(line.strip()):
 							break
-					except SandboxError as e:
+					except (SandboxError, LLMError) as e:
 						self.ui.notice(str(e))
+					except KeyboardInterrupt:
+						self.ui.notice("Interrupted.")
 					continue
 				self.turn(line)
 		finally:
@@ -246,7 +259,6 @@ def main() -> None:
 	clean_scratch(scratch_root())
 	app = App(args)
 	try:
-		app.load_model()
 		if args.resume or args.cont:
 			chats = list_chats(1)
 			if args.cont and not chats:
@@ -255,8 +267,10 @@ def main() -> None:
 		else:
 			chat = app.new_chat()
 		app.open_chat(chat)
-	except (LLMError, SandboxError, FileNotFoundError) as e:
+	except (LLMError, SandboxError, FileNotFoundError, ValueError) as e:
 		sys.exit(str(e))
+	except KeyboardInterrupt:
+		sys.exit(130)
 
 	if args.prompt is not None:
 		try:

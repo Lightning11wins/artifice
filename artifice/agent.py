@@ -9,6 +9,7 @@ from .store import Chat
 from .tools import ToolResult, Tools
 
 CHARS_PER_TOKEN = 3.0  # conservative guess, used only until the server reports real usage
+ELIDED_CHARS_PER_TOKEN = 6.0  # low guess at the tokens elision frees, so the estimate errs high
 MIN_ELIDE_CHARS = 300
 SUMMARY_MAX_TOKENS = 4096
 
@@ -181,7 +182,7 @@ class Agent:
 		for i in candidates[:max(0, len(candidates) - keep)]:
 			if estimate <= target:
 				break
-			estimate -= int((len(self.messages[i]["content"]) - len(ELIDED)) / CHARS_PER_TOKEN)
+			estimate -= int((len(self.messages[i]["content"]) - len(ELIDED)) / ELIDED_CHARS_PER_TOKEN)
 			self.messages[i]["content"] = ELIDED
 			elided += 1
 		if elided:

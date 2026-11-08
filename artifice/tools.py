@@ -112,7 +112,7 @@ class Tools:
 		path = path or "."
 		if self.rg:
 			# Later globs win in rg, so the .git exclusion goes last.
-			argv = ["rg", "--files", "--hidden", "--sort", "path", "-g", pattern, "-g", "!.git"]
+			argv = [self.rg, "--files", "--hidden", "--sort", "path", "-g", pattern, "-g", "!.git"]
 			if include_ignored:
 				argv.append("--no-ignore")
 			argv += ["--", path]
@@ -128,7 +128,7 @@ class Tools:
 			context: int = 0, include_ignored: bool = False) -> ToolResult:
 		path = path or "."
 		if self.rg:
-			argv = ["rg", "--line-number", "--with-filename", "--no-heading", "--color=never", "--hidden",
+			argv = [self.rg, "--line-number", "--with-filename", "--no-heading", "--color=never", "--hidden",
 				"--sort", "path", "--max-columns", "400", "--max-columns-preview"]
 			if include:
 				argv += ["-g", include]

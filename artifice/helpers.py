@@ -24,9 +24,6 @@ def read_file(path: str, offset: int = 1, limit: int = 2000) -> str:
 	if b"\0" in probe:
 		return (f"Error: {path} looks binary ({st.st_size} bytes). "
 			"Use run_shell_command with file, strings, xxd or pdftotext.")
-	if st.st_size == 0:
-		return f"({path} is empty)"
-
 	offset = max(1, offset)
 	limit = max(1, limit)
 	out: list[str] = []
@@ -44,6 +41,8 @@ def read_file(path: str, offset: int = 1, limit: int = 2000) -> str:
 			out.append(f"{number:>6}\t{line}")
 			chars += len(line) + 8
 			last = number
+	if total == 0:
+		return f"({path} is empty)"
 	if offset > total:
 		return f"Error: offset {offset} is past the end of {path} ({total} lines)."
 	if last < total:
@@ -99,6 +98,7 @@ def _size(n: int) -> str:
 
 def main() -> None:
 	tool, args = sys.argv[1], json.loads(sys.argv[2])
+	sys.stdout.reconfigure(errors="backslashreplace")  # file names need not be UTF-8
 	try:
 		print(globals()[tool](**args))
 	except OSError as e:

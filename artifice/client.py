@@ -49,15 +49,14 @@ class LLMClient:
 			if resp.status != 200:
 				raise LLMError(f"Failed to generate: HTTP {resp.status}: {_error_text(resp.read())}")
 			saw_done = False
-			for raw in resp:
-				line = raw.decode("utf-8").strip()
-				if not line.startswith("data:"):
-					continue
-				payload = line[5:].strip()
+			for payload in _events(resp, self.host, self.port):
 				if payload == "[DONE]":
 					saw_done = True
 					break
-				event = json.loads(payload)
+				try:
+					event = json.loads(payload)
+				except ValueError as e:
+					raise LLMError(f"Failed to parse llm-server event {payload[:200]!r}: {e}") from e
 				if "error" in event:
 					raise LLMError(f"Failed to generate: {event['error']}")
 				yield event
@@ -65,6 +64,17 @@ class LLMClient:
 				raise LLMError("Failed to generate: stream ended without [DONE]")
 		finally:
 			conn.close()
+
+
+def _events(resp: http.client.HTTPResponse, host: str, port: int) -> Iterator[str]:
+	"""Yields the payload of each SSE data line."""
+	try:
+		for raw in resp:
+			line = raw.decode("utf-8", errors="replace").strip()
+			if line.startswith("data:"):
+				yield line[5:].strip()
+	except (OSError, http.client.HTTPException) as e:
+		raise LLMError(f"Failed to read from llm-server at {host}:{port}: {e}") from e
 
 
 def _error_text(data: bytes) -> str:

@@ -74,14 +74,19 @@ class Chat:
 		if len(matches) > 1:
 			names = ", ".join(m.stem for m in matches[:5])
 			raise FileNotFoundError(f"Failed to pick a chat: {chat_id!r} matches {names}")
-		with open(matches[0]) as f:
-			return cls(**json.load(f))
+		try:
+			with open(matches[0]) as f:
+				return cls(**json.load(f))
+		except (ValueError, TypeError) as e:
+			raise ValueError(f"Failed to load chat {matches[0]}: {e}") from e
 
 
 def list_chats(limit: int = 20) -> list[Chat]:
 	paths = sorted(chats_dir().glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
 	chats = []
-	for p in paths[:limit]:
+	for p in paths:
+		if len(chats) == limit:
+			break
 		try:
 			with open(p) as f:
 				chats.append(Chat(**json.load(f)))
