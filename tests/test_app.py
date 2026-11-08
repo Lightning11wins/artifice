@@ -12,7 +12,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from artifice import cli  # noqa: E402
+from artifice import cli, deps, helpers  # noqa: E402
 from artifice.agent import Agent, Settings  # noqa: E402
 from artifice.client import LLMError  # noqa: E402
 from artifice.sandbox import SandboxError  # noqa: E402
@@ -109,6 +109,12 @@ class AgentTest(TempDataTest):
 		self.assertEqual(saved[-1]["tool_call_id"], saved[-2]["tool_calls"][0]["id"])
 
 
+	def test_tool_output_larger_than_the_context_is_elided(self):
+		agent = Agent(FakeClient(calls=1), self.chat(), FakeTools(), Settings(model="m"), QuietUI(), context_length=8192)
+		agent.send("go")
+		self.assertLess(agent.estimate_tokens(), 8192)
+
+
 class OpenChatTest(TempDataTest):
 	def app(self) -> cli.App:
 		args = argparse.Namespace(host="h", port=1, model=None, max_tokens=100, temperature=None, top_p=None,
@@ -135,6 +141,37 @@ class OpenChatTest(TempDataTest):
 			with self.assertRaises(SandboxError):
 				app.open_chat(Chat.new("other", "read-only", "/"))
 		self.assertEqual((app.settings.model, app.loaded, app.context_length), ("good", "good", 2000))
+
+
+class CommandTest(unittest.TestCase):
+	def test_paths_are_messages(self):
+		self.assertTrue(cli.is_command("/resume 2026"))
+		self.assertTrue(cli.is_command("/hlep"))
+		self.assertFalse(cli.is_command("/var/log/syslog has errors, why?"))
+		self.assertFalse(cli.is_command("why?"))
+
+
+class GlobFallbackTest(unittest.TestCase):
+	def test_matches_like_rg(self):
+		with tempfile.TemporaryDirectory() as root:
+			for name in ("a.py", "tests/b.py", "tests/deep/c.py", ".git/d.py", ".hidden/e.py", "tests/f.txt"):
+				(Path(root) / name).parent.mkdir(parents=True, exist_ok=True)
+				(Path(root) / name).write_text("")
+			names = lambda pattern: [os.path.relpath(p, root) for p in helpers.glob_files(pattern, root).split("\n")]
+			self.assertEqual(names("tests/*.py"), ["tests/b.py"])
+			self.assertEqual(names("*.py"), [".hidden/e.py", "a.py", "tests/b.py", "tests/deep/c.py"])
+			self.assertEqual(helpers.glob_files("*.rs", root), "No files matched.")
+
+
+class DepsTest(TempDataTest):
+	def test_failed_install_is_not_asked_again(self):
+		state = Path(self.data.name) / "state.json"
+		which = lambda command: None if command == "rg" else f"/usr/bin/{command}"
+		with mock.patch.object(deps.shutil, "which", which), mock.patch.object(deps, "_ask", return_value=True), \
+				mock.patch.object(deps.subprocess, "run") as run, mock.patch.object(deps.sys, "stderr"):
+			self.assertTrue(deps.ensure(state))
+			self.assertTrue(deps.ensure(state))
+		self.assertEqual(run.call_count, 1)
 
 
 class TerminalUITest(unittest.TestCase):

@@ -178,8 +178,8 @@ class Agent:
 			return
 		if self._summarize(keep_current=not force) and self.estimate_tokens() < limit:
 			return
-		if self._elide(target, keep=1) >= limit:
-			self.ui.notice("The conversation is still near the context limit. Use /new or /compact between turns.")
+		if self._elide(target, keep=1) >= limit and self._elide(target, keep=0) >= limit:
+			self.ui.notice("The conversation is still near the context limit. Start a new chat with /new.")
 
 	def _elide(self, target: float, keep: int) -> int:
 		estimate = self.estimate_tokens()

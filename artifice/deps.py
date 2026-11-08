@@ -64,7 +64,7 @@ def ensure(state_path: Path, recheck: bool = False) -> bool:
 				ok = False
 				if answer is None:
 					print(f"Missing {command} ({purpose}). Run `{' '.join(argv)}`.", file=sys.stderr)
-			elif answer is False:
+			elif answer is not None:
 				declined.add(command)
 				print(f"Using fallbacks without {command}. Run with --check-deps to be asked again.", file=sys.stderr)
 	state["declined"] = sorted(declined)

@@ -2,6 +2,7 @@
 
 Usage: helpers.py TOOL JSON_ARGS
 """
+import glob
 import json
 import os
 import stat
@@ -78,6 +79,18 @@ def list_directory(path: str) -> str:
 	if len(entries) > MAX_ENTRIES:
 		lines.append(f"[{len(entries) - MAX_ENTRIES} more entries not shown. Use glob or run_shell_command to filter.]")
 	return "\n".join(lines)
+
+
+def glob_files(pattern: str, path: str) -> str:
+	"""Files under path matching pattern, skipping .git. The fallback for glob when rg is missing."""
+	if "/" not in pattern:
+		pattern = f"**/{pattern}"  # like rg, a pattern without a slash matches at any depth
+	matches = []
+	for match in glob.iglob(pattern, root_dir=path, recursive=True, include_hidden=True):
+		full = os.path.join(path, match)
+		if ".git" not in match.split(os.sep) and os.path.isfile(full):
+			matches.append(full)
+	return "\n".join(sorted(matches)) or "No files matched."
 
 
 def _kind(mode: int) -> str:

@@ -3,6 +3,7 @@ import argparse
 import os
 import re
 import readline
+import signal
 import sys
 from pathlib import Path
 
@@ -105,6 +106,16 @@ def parse_args() -> argparse.Namespace:
 	p.add_argument("--top-p", type=float, default=0.95)
 	p.add_argument("--check-deps", action="store_true", help="ask again about optional tools you declined")
 	return p.parse_args()
+
+
+def is_command(line: str) -> bool:
+	"""Slash commands are one word, so a message can start with a path like /var/log."""
+	return line.startswith("/") and "/" not in line.split(maxsplit=1)[0][1:]
+
+
+def exit_on_sigterm() -> None:
+	"""Turns SIGTERM into SystemExit, so cleanup code runs and kills the sandbox's running command."""
+	signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
 
 
 def read_input() -> str | None:
@@ -236,7 +247,7 @@ class App:
 					break
 				if not line.strip():
 					continue
-				if line.startswith("/"):
+				if is_command(line):
 					try:
 						if not self.command(line.strip()):
 							break
@@ -265,6 +276,7 @@ class App:
 def main() -> None:
 	for stream in (sys.stdout, sys.stderr):
 		stream.reconfigure(errors="backslashreplace")
+	exit_on_sigterm()
 	try:
 		_main()
 	except KeyboardInterrupt:
