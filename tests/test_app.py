@@ -65,7 +65,7 @@ class OverflowClient(FakeClient):
 		self.limit = limit
 
 	def stream(self, body):
-		text = "".join(m.get("content") or "" for m in body["messages"])
+		text = "".join((m.get("content") or "") + json.dumps(m.get("tool_calls") or "") for m in body["messages"])
 		digits = sum(c.isdigit() for c in text)
 		if digits + (len(text) - digits) / 4 > self.limit:
 			raise LLMError("Failed to generate: the request exceeds the available context size")
@@ -253,6 +253,35 @@ class AgentTest(TempDataTest):
 				agent.send("hi")
 				self.assertEqual(agent.messages[-1]["content"], "done")
 				self.assertEqual(agent.client.summaries, 1)
+				self.assertIn("hi", [m["content"] for m in agent.messages])
+
+	def test_earlier_tool_call_arguments_too_long_for_the_context_are_replaced(self):
+		chat = self.chat(("user", "write it"))
+		chat.messages += [
+			{"role": "assistant", "content": "", "tool_calls": [{"id": "w", "type": "function",
+				"function": {"name": "run_shell_command", "arguments": json.dumps({"command": "x" * 80000})}}]},
+			{"role": "tool", "tool_call_id": "w", "content": "ok"},
+			{"role": "assistant", "content": "ok"},
+		]
+		agent = Agent(OverflowClient(limit=16000), chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=16384)
+		agent.send("hi")
+		self.assertEqual(agent.messages[-1]["content"], "done")
+
+	def test_an_overflow_nothing_can_shrink_stops(self):
+		class CountingClient(OverflowClient):
+			def stream(self, body):
+				self.requests = getattr(self, "requests", 0) + 1
+				if self.requests > 20:
+					raise AssertionError("the overflow retry did not stop")
+				yield from super().stream(body)
+
+		chat = self.chat(("user", "go"))
+		chat.messages.append({"role": "assistant", "content": "", "tool_calls": [{"id": f"c{i}", "type": "function",
+			"function": {"name": "glob", "arguments": "{}"}} for i in range(8)]})
+		chat.messages += [{"role": "tool", "tool_call_id": f"c{i}", "content": "ok"} for i in range(8)]
+		agent = Agent(CountingClient(limit=100), chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=16384)
+		with self.assertRaisesRegex(LLMError, "context size"):
+			agent.send("hi")
 
 	def test_usage_from_summary_requests_is_not_counted_for_the_chat(self):
 		class UsageClient(FakeClient):

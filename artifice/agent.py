@@ -106,8 +106,9 @@ class Agent:
 				self.bytes_per_token = max(0.5, min(self.bytes_per_token, size / self.context_length))
 				self.usage_tokens, self.usage_n = self.context_length, len(self.messages)
 				if overflowed_at is not None and size >= overflowed_at:
-					self._remove_oversized_request(size, e)
-					raise
+					if not self._replace_largest(e) or self._history_bytes() >= size:
+						raise
+					size = self._history_bytes()
 				overflowed_at = size
 				self.ui.notice("The conversation is over the context limit. Compacting.")
 				continue
@@ -128,33 +129,38 @@ class Agent:
 				self.messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": result.text})
 			self.chat.save()
 
-	def _remove_oversized_request(self, size: int, error: LLMError) -> None:
-		"""Replaces the current user message when it is most of an overflow compaction cannot fix, so later turns work."""
-		last_user = max((i for i, m in enumerate(self.messages) if m["role"] == "user"), default=None)
-		if last_user is None:
-			return
-		content = self.messages[last_user].get("content") or ""
-		if len(content.encode()) <= size / 2:
-			return
-		self.messages[last_user]["content"] = TOO_LONG.format(chars=len(content))
-		self.chat.save()
-		raise LLMError(f"Failed to send: the message is too long for the context ({len(content):,} characters).") from error
+	def _replace_largest(self, error: LLMError) -> bool:
+		"""Replaces the largest message text with a note, for an overflow compaction cannot fix. False if none is left.
 
-	def _fit(self, history: list[dict]) -> list[dict]:
-		"""Cuts the longest messages in history down to one limit, so a summary request and its reply fit."""
-		budget = max(1000, int((self.context_length - SUMMARY_MAX_TOKENS - 1024) * self.bytes_per_token))
-		sizes = sorted(len((m.get("content") or "").encode()) for m in history)
-		rest = budget - sum(_bytes(m, reasoning=False) - len((m.get("content") or "").encode()) for m in history)
-		limit = None
-		for i, size in enumerate(sizes):
-			if size * (len(sizes) - i) > rest:
-				limit = max(0, rest) // (len(sizes) - i)
-				break
-			rest -= size
-		if limit is None:
-			return history
-		return [{**m, "content": _cut(m["content"], limit)} if len((m.get("content") or "").encode()) > limit else m
-			for m in history]
+		Raises LLMError when that text is the current request, which cannot be answered without it."""
+		last_user = max((i for i, m in enumerate(self.messages) if m["role"] == "user"), default=0)
+		parts = []
+		for i, m in enumerate(self.messages):
+			if m["role"] == "system":
+				continue
+			parts.append((len((m.get("content") or "").encode()), i, "content"))
+			if i > last_user:
+				parts.append((len((m.get("reasoning_content") or "").encode()), i, "reasoning_content"))
+			if m.get("tool_calls"):
+				parts.append((len(json.dumps(m["tool_calls"])), i, "tool_calls"))
+		size, i, key = max(parts, default=(0, 0, ""))
+		if size <= MIN_ELIDE_CHARS:
+			return False
+		m = self.messages[i]
+		if key == "reasoning_content":
+			del m[key]
+		elif key == "tool_calls":
+			note = json.dumps({"note": TOO_LONG.format(chars=size)})
+			for call in m["tool_calls"]:
+				call.setdefault("function", {})["arguments"] = note
+		else:
+			chars = len(m["content"])
+			m["content"] = TOO_LARGE.format(chars=chars) if m["role"] == "tool" else TOO_LONG.format(chars=chars)
+		self.chat.save()
+		if i == last_user and key == "content":
+			raise LLMError(f"Failed to send: the message is too long for the context ({chars:,} characters).") from error
+		self.ui.notice(f"Replaced the longest message ({m['role']}, {size:,} bytes) with a note to fit the context.")
+		return True
 
 	def _template_args(self) -> dict:
 		if self.settings.thinking is None:
@@ -301,18 +307,12 @@ class Agent:
 				self.ui.notice("Nothing to summarize.")
 			return False
 		self.ui.notice("Summarizing earlier conversation...")
-		for attempt in range(2):
-			request = self._fit(self.messages[:last_user]) + [{"role": "user", "content": SUMMARY_REQUEST}]
-			try:
-				reply, _ = self._generate(request, {"enable_thinking": False}, SUMMARY_MAX_TOKENS, display=False)
-				break
-			except LLMError as e:
-				if attempt == 0 and _is_overflow(e):
-					size = sum(_bytes(m, reasoning=False) for m in request)
-					self.bytes_per_token = max(0.5, min(self.bytes_per_token, size / self.context_length))
-					continue
-				self.ui.notice(f"Failed to summarize: {e}")
-				return False
+		request = self.messages[:last_user] + [{"role": "user", "content": SUMMARY_REQUEST}]
+		try:
+			reply, _ = self._generate(request, {"enable_thinking": False}, SUMMARY_MAX_TOKENS, display=False)
+		except LLMError as e:
+			self.ui.notice(f"Failed to summarize: {e}")
+			return False
 		notes = reply["content"].strip()
 		if reply.get("tool_calls"):
 			self.ui.notice("Failed to summarize: the model called a tool instead of writing notes.")
@@ -328,16 +328,6 @@ class Agent:
 		self.chat.save()
 		self.ui.notice(f"Compacted earlier conversation into notes (about {self.estimate_tokens():,} tokens now).")
 		return True
-
-
-def _cut(text: str, limit: int) -> str:
-	"""Keeps the head and tail of text, about limit UTF-8 bytes in all."""
-	data = text.encode()
-	if len(data) <= limit:
-		return text
-	head = data[:limit // 2].decode(errors="ignore")
-	tail = data[len(data) - limit // 2:].decode(errors="ignore")
-	return f"{head}\n[... {len(text) - len(head) - len(tail):,} characters cut to fit the context ...]\n{tail}"
 
 
 def _is_summary(m: dict) -> bool:
