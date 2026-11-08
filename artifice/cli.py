@@ -45,6 +45,8 @@ class TerminalUI:
 		self.show_reasoning = show_reasoning
 		self.color = trace_out.isatty()
 		self.state: str | None = None
+		# With separate streams, text is held until the reply ends, since text before a tool call is trace.
+		self.held: list[str] | None = [] if answer_out is not trace_out else None
 
 	def _c(self, code: str, text: str) -> str:
 		return f"\033[{code}m{text}\033[0m" if self.color else text
@@ -61,13 +63,20 @@ class TerminalUI:
 			self.trace.write("\n\n")
 			self.trace.flush()
 		self.state = "answer"
+		if self.held is not None:
+			self.held.append(_printable(text))
+			return
 		self.out.write(_printable(text))
 		self.out.flush()
 
-	def end_stream(self) -> None:
+	def end_stream(self, tool_calls: bool = False) -> None:
 		if self.state == "answer":
-			self.out.write("\n")
-			self.out.flush()
+			out = self.trace if tool_calls else self.out
+			if self.held is not None:
+				out.write("".join(self.held))
+				self.held.clear()
+			out.write("\n")
+			out.flush()
 		elif self.state == "reasoning":
 			self.trace.write("\n")
 		self.state = None

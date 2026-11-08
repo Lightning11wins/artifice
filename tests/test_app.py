@@ -93,7 +93,7 @@ class QuietUI:
 		self.notices.append(text)
 
 	def __getattr__(self, name):
-		return lambda *args: None
+		return lambda *args, **kwargs: None
 
 
 class TempDataTest(unittest.TestCase):
@@ -231,6 +231,36 @@ class AgentTest(TempDataTest):
 		agent = Agent(FakeClient(calls=1), self.chat(), FakeTools(), Settings(model="m"), QuietUI(), context_length=8192)
 		agent.send("go")
 		self.assertLess(agent.estimate_tokens(), 8192)
+		self.assertIn("Output too large for the context (30,000 characters)", agent.messages[-2]["content"])
+
+	def test_newest_tool_output_that_fits_is_kept(self):
+		# 10,000 estimated tokens: over 75% of the context, with room for a reply.
+		agent = Agent(FakeClient(calls=1), self.chat(), FakeTools(), Settings(model="m"), QuietUI(), context_length=13000)
+		agent.send("go")
+		self.assertEqual(agent.messages[-2]["content"], "y" * 30000)
+		self.assertGreater(min(agent.client.max_tokens), 256)
+
+	def test_reasoning_from_earlier_steps_of_a_long_turn_is_dropped(self):
+		class ThinkingClient(OverflowClient):
+			def stream(self, body):
+				if not body["messages"][-1]["content"].startswith("Stop here."):
+					text = "".join(m.get("content") or "" for m in body["messages"])
+					text += "".join(m.get("reasoning_content") or "" for m in body["messages"][2:])
+					if len(text) / 4 > self.limit:
+						raise LLMError("Failed to generate: the request exceeds the available context size")
+					yield {"reasoning": "r" * 6000}
+				yield from FakeClient.stream(self, body)
+
+		for usage in (None, {"prompt_tokens": 100, "completion_tokens": 100}):
+			with self.subTest(usage=usage):
+				client = ThinkingClient(limit=32768)
+				client.calls, client.usage = 40, usage
+				agent = Agent(client, self.chat(("user", "earlier"), ("assistant", "ok")), FakeTools(output="ok"),
+					Settings(model="m"), QuietUI(), context_length=32768)
+				agent.send("go")
+				self.assertEqual(agent.messages[-1]["content"], "done")
+				self.assertIn("reasoning_content", agent.messages[-1])
+				self.assertGreater(min(client.max_tokens), 256)
 
 
 class OpenChatTest(TempDataTest):
@@ -608,6 +638,17 @@ class DepsTest(TempDataTest):
 
 
 class TerminalUITest(unittest.TestCase):
+	def test_one_shot_text_before_a_tool_call_goes_to_the_trace(self):
+		out, trace = io.StringIO(), io.StringIO()
+		ui = cli.TerminalUI(answer_out=out, trace_out=trace)
+		ui.token("Let me check.")
+		ui.end_stream(tool_calls=True)
+		ui.reasoning("hmm")
+		ui.token("6.12")
+		ui.end_stream()
+		self.assertEqual(out.getvalue(), "6.12\n")
+		self.assertIn("Let me check.\n", trace.getvalue())
+
 	def test_control_characters_are_escaped(self):
 		out = mock.Mock()
 		out.isatty.return_value = False

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from .client import LLMClient, LLMError
-from .prompt import ELIDED, SUMMARY_LABEL, SUMMARY_REQUEST
+from .prompt import ELIDED, SUMMARY_LABEL, SUMMARY_REQUEST, TOO_LARGE
 from .store import Chat
 from .tools import ToolResult, Tools
 
@@ -30,7 +30,7 @@ class Settings:
 class UI(Protocol):
 	def reasoning(self, text: str) -> None: ...
 	def token(self, text: str) -> None: ...
-	def end_stream(self) -> None: ...
+	def end_stream(self, tool_calls: bool = False) -> None: ...
 	def tool_call(self, name: str, arguments: str) -> None: ...
 	def tool_result(self, name: str, result: ToolResult) -> None: ...
 	def notice(self, text: str) -> None: ...
@@ -179,7 +179,7 @@ class Agent:
 					self.context_length = usage.get("context_length") or self.context_length
 		finally:
 			if display:
-				self.ui.end_stream()
+				self.ui.end_stream(tool_calls=bool(tool_calls))
 
 		message: dict = {"role": "assistant", "content": "".join(content)}
 		if reasoning:
@@ -213,19 +213,44 @@ class Agent:
 			return
 		if self._summarize(keep_current=not force) and self.estimate_tokens() < limit:
 			return
-		if self._elide(target, keep=1) >= limit and self._elide(target, keep=0) >= limit:
+		if self._drop_turn_reasoning() < limit or self._elide(target, keep=1) < limit:
+			return
+		# The newest output may be unseen, so it goes only when the reply would not fit beside it.
+		reserve = min(self.settings.max_tokens, self.context_length // 8)
+		if self.estimate_tokens() >= self.context_length - reserve and self._elide(target, keep=0) >= limit:
 			self.ui.notice("The conversation is still near the context limit. Start a new chat with /new.")
+
+	def _drop_turn_reasoning(self) -> int:
+		"""Clears reasoning from the current turn's steps before the newest, which templates send until the next user message."""
+		last_user = max((i for i, m in enumerate(self.messages) if m["role"] == "user"), default=0)
+		steps = [i for i, m in enumerate(self.messages)
+			if i > last_user and m["role"] == "assistant" and m.get("reasoning_content")]
+		freed = 0
+		for i in steps[:-1]:
+			size = len(self.messages[i].pop("reasoning_content").encode())
+			freed += size if i < self.usage_n else 0
+		estimate = self.estimate_tokens()
+		if len(steps) > 1:
+			if self.usage_tokens is not None:
+				self.usage_tokens -= int(freed / ELIDED_CHARS_PER_TOKEN)
+				estimate = self.estimate_tokens()
+			self.chat.save()
+			self.ui.notice(f"Dropped reasoning from {len(steps) - 1} earlier steps (about {estimate:,} tokens now).")
+		return estimate
 
 	def _elide(self, target: float, keep: int) -> int:
 		estimate = self.estimate_tokens()
 		candidates = [i for i, m in enumerate(self.messages)
 			if m["role"] == "tool" and m["content"] != ELIDED and len(m["content"]) > MIN_ELIDE_CHARS]
+		seen = max((i for i, m in enumerate(self.messages) if m["role"] == "assistant"), default=-1)
 		elided = 0
 		for i in candidates[:max(0, len(candidates) - keep)]:
 			if estimate <= target:
 				break
-			freed = int((len(self.messages[i]["content"]) - len(ELIDED)) / ELIDED_CHARS_PER_TOKEN)
-			self.messages[i]["content"] = ELIDED
+			size = len(self.messages[i]["content"])
+			note = ELIDED if i < seen else TOO_LARGE.format(chars=size)
+			freed = int((size - len(note)) / ELIDED_CHARS_PER_TOKEN)
+			self.messages[i]["content"] = note
 			elided += 1
 			# Without a server count, the estimate is a character count, so count again.
 			estimate = estimate - freed if self.usage_tokens is not None else self.estimate_tokens()
