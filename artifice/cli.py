@@ -286,6 +286,8 @@ class App:
 							break
 					except (SandboxError, LLMError) as e:
 						self.ui.notice(str(e))
+					except OSError as e:
+						self.ui.notice(f"Failed to run {line.split()[0]}: {e}")
 					except KeyboardInterrupt:
 						self.ui.notice("Interrupted.")
 					continue
@@ -301,7 +303,7 @@ class App:
 			self.ui.notice(str(e))
 			return
 		except OSError as e:
-			self.ui.notice(f"Failed to save the chat: {e}")  # such as a full disk
+			self.ui.notice(f"Failed to finish the turn: {e}")  # such as a full disk
 			return
 		except KeyboardInterrupt:
 			return
@@ -337,7 +339,7 @@ def _main() -> None:
 		else:
 			chat = app.new_chat()
 		app.open_chat(chat)
-	except (LLMError, SandboxError, FileNotFoundError, ValueError) as e:
+	except (LLMError, SandboxError, OSError, ValueError) as e:
 		sys.exit(str(e))
 
 	if args.prompt is not None:
@@ -345,6 +347,8 @@ def _main() -> None:
 			app.agent.send(args.prompt)
 		except LLMError as e:
 			sys.exit(str(e))
+		except OSError as e:
+			sys.exit(f"Failed to finish the turn: {e}")
 		return
 	app.repl()
 

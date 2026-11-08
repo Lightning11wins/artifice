@@ -54,6 +54,19 @@ class FakeClient:
 		return {"context_length": 1000}
 
 
+class OverflowClient(FakeClient):
+	"""Rejects requests over `limit` characters, as a server does past its context."""
+
+	def __init__(self, limit: int):
+		super().__init__()
+		self.limit = limit
+
+	def stream(self, body):
+		if sum(len(m.get("content") or "") for m in body["messages"]) > self.limit:
+			raise LLMError("Failed to generate: the request exceeds the available context size")
+		yield from super().stream(body)
+
+
 class FakeTools:
 	schemas: list = []
 
@@ -134,6 +147,33 @@ class AgentTest(TempDataTest):
 		Agent(client, self.chat(), FakeTools(), Settings(model="m"), ui, context_length=32768).send("hi")
 		self.assertIn(f"Response hit max_tokens ({client.max_tokens[0]})", " ".join(ui.notices))
 
+	def test_estimate_counts_utf8_bytes(self):
+		chat = self.chat(("user", "中文注释" * 3000))
+		agent = Agent(FakeClient(), chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=32768)
+		self.assertGreaterEqual(agent.estimate_tokens(), 12000)
+
+	def test_context_overflow_is_compacted_and_retried(self):
+		# Digits take a token each, so the estimate is a third of the real count.
+		chat = self.chat(("user", "go"))
+		chat.messages += [
+			{"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",
+				"function": {"name": "read_file", "arguments": "{}"}}]},
+			{"role": "tool", "tool_call_id": "c1", "content": "1" * 30000},
+		]
+		agent = Agent(OverflowClient(limit=16000), chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=16384)
+		agent.send("next")
+		self.assertEqual(agent.messages[-1]["content"], "done")
+		self.assertNotIn("1" * 30000, [m["content"] for m in agent.messages])
+
+	def test_tool_calls_left_open_by_a_crash_are_answered_on_resume(self):
+		chat = self.chat(("user", "go"))
+		chat.messages.append({"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",
+			"function": {"name": "run_shell_command", "arguments": "{}"}}]})
+		agent = Agent(FakeClient(), chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=32768)
+		agent.send("hi")
+		self.assertEqual([(m["role"], m.get("tool_call_id")) for m in agent.messages[2:5]],
+			[("assistant", None), ("tool", "c1"), ("user", None)])
+
 	def test_tool_output_larger_than_the_context_is_elided(self):
 		agent = Agent(FakeClient(calls=1), self.chat(), FakeTools(), Settings(model="m"), QuietUI(), context_length=8192)
 		agent.send("go")
@@ -184,7 +224,16 @@ class OpenChatTest(TempDataTest):
 		app.agent = mock.Mock()
 		app.agent.send.side_effect = OSError(28, "No space left on device")
 		app.turn("hi")
-		self.assertIn("Failed to save the chat", " ".join(app.ui.notices))
+		self.assertIn("Failed to finish the turn", " ".join(app.ui.notices))
+
+	def test_os_error_in_a_command_is_reported(self):
+		app = self.app()
+		app.ui = QuietUI()
+		app.command = mock.Mock(side_effect=OSError(28, "No space left on device"))
+		with mock.patch.object(cli, "read_input", side_effect=["/compact", None]), \
+				mock.patch.object(app, "banner"), mock.patch("builtins.print"):
+			app.repl()
+		self.assertIn("Failed to run /compact", " ".join(app.ui.notices))
 
 	def test_resuming_the_open_chat_keeps_its_sandbox(self):
 		app = self.app()

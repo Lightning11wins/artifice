@@ -8,7 +8,7 @@ from .prompt import ELIDED, SUMMARY_LABEL, SUMMARY_REQUEST
 from .store import Chat
 from .tools import ToolResult, Tools
 
-CHARS_PER_TOKEN = 3.0  # conservative guess, used only until the server reports real usage
+BYTES_PER_TOKEN = 3.0  # UTF-8 bytes per token: a conservative guess used only until the server reports real usage
 ELIDED_CHARS_PER_TOKEN = 6.0  # low guess at the tokens elision frees, so the estimate errs high
 MIN_ELIDE_CHARS = 300
 SUMMARY_MAX_TOKENS = 4096
@@ -54,10 +54,11 @@ class Agent:
 
 	def estimate_tokens(self) -> int:
 		if self.usage_tokens is None:
-			return int(sum(map(_chars, self.messages)) / CHARS_PER_TOKEN)
-		return self.usage_tokens + int(sum(map(_chars, self.messages[self.usage_n:])) / CHARS_PER_TOKEN)
+			return int(sum(map(_bytes, self.messages)) / BYTES_PER_TOKEN)
+		return self.usage_tokens + int(sum(map(_bytes, self.messages[self.usage_n:])) / BYTES_PER_TOKEN)
 
 	def send(self, text: str) -> None:
+		self._close_open_tool_calls("Artifice stopped before this tool finished.")  # a chat saved mid-tool
 		self.messages.append({"role": "user", "content": text})
 		self.chat.save()
 		try:
@@ -73,10 +74,23 @@ class Agent:
 			self.chat.save()
 
 	def _loop(self) -> None:
+		overflowed = False
 		while True:
 			self.maybe_compact()
 			max_tokens = self._max_tokens()
-			message, stop_reason = self._generate(self.messages, self._template_args(), max_tokens)
+			try:
+				message, stop_reason = self._generate(self.messages, self._template_args(), max_tokens)
+			except LLMError as e:
+				if not _is_overflow(e):
+					raise
+				# The estimate was low. Count the history as full so compaction runs, then retry once.
+				self.usage_tokens, self.usage_n = self.context_length, len(self.messages)
+				if overflowed:
+					raise
+				overflowed = True
+				self.ui.notice("The conversation is over the context limit. Compacting.")
+				continue
+			overflowed = False
 			self.messages.append(message)
 			self.chat.save()
 			if stop_reason == "length":
@@ -237,8 +251,14 @@ def _is_summary(m: dict) -> bool:
 	return m["role"] == "user" and (m.get("content") or "").startswith("[Compacted context]")
 
 
-def _chars(m: dict) -> int:
-	n = len(m.get("content") or "") + len(m.get("reasoning_content") or "")
+def _is_overflow(e: LLMError) -> bool:
+	text = str(e).lower()
+	return "context size" in text or "exceed_context" in text or "context length" in text
+
+
+def _bytes(m: dict) -> int:
+	"""UTF-8 bytes, which track tokens better than characters for text like CJK."""
+	n = len((m.get("content") or "").encode()) + len((m.get("reasoning_content") or "").encode())
 	if m.get("tool_calls"):
 		n += len(json.dumps(m["tool_calls"]))
 	return n
