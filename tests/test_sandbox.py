@@ -5,6 +5,7 @@ Needs sudo without a password prompt (run `sudo -v` first), and cannot run insid
 """
 import ctypes
 import fcntl
+import json
 import os
 import shutil
 import signal
@@ -400,6 +401,24 @@ Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(["sleep"
 		self.assertIn("ok", r.output)
 		self.assertRegex(r.output, r"drwxrwxrwt")
 		self.assertFalse(os.path.exists("/dev/shm/artifice-shm-test"))
+
+	def test_glob_patterns_are_relative_to_path(self):
+		from artifice.tools import Tools
+		base = Path(tempfile.mkdtemp(dir=HOST_DIR))
+		tools = Tools(Sandbox(READ_ONLY, self.scratch, str(base)))
+		if not tools.rg:
+			self.skipTest("rg is not installed")
+		project = base / "project"
+		(project / "tests").mkdir(parents=True, exist_ok=True)
+		(project / "tests" / "t.py").write_text("needle\n")
+		for path in (str(project), "project", "project/"):
+			with self.subTest(path=path):
+				found = tools.call("glob", json.dumps({"pattern": "tests/*.py", "path": path})).text
+				self.assertEqual(found, os.path.join(path, "tests/t.py"))
+				found = tools.call("grep_search", json.dumps({"pattern": "needle", "path": path, "include": "tests/*.py"})).text
+				self.assertEqual(found, os.path.join(path, "tests/t.py") + ":1:needle")
+		self.assertEqual(tools.call("grep_search", json.dumps({"pattern": "needle", "path": "project/tests/t.py"})).text,
+			"project/tests/t.py:1:needle")
 
 	def test_timeout_and_background_processes(self):
 		start = time.monotonic()

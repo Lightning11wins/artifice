@@ -11,6 +11,14 @@ HELPERS = str(Path(__file__).with_name("helpers.py"))
 OUTPUT_MAX_CHARS = 30000
 OUTPUT_TAIL_CHARS = 8000
 SCRATCH_WARN_BYTES = 2 << 30
+# Runs rg inside a directory given as $1, since rg matches globs relative to its working directory.
+# Output paths get $2 as a prefix, so they read as if rg had searched $1. A file in $1 is searched directly.
+RG_IN_DIR = (
+	'dir=$1 prefix=$2; shift 2; '
+	'if [ ! -d "$dir" ]; then exec "$@" -- "$dir"; fi; '
+	'cd -- "$dir" || exit 2; set -o pipefail; '
+	'"$@" -- . | prefix="$prefix" awk \'$0 == "--" { print; next } { sub(/^\\.\\//, ""); print ENVIRON["prefix"] $0 }\''
+)
 SCRATCH_FULL = ("/tmp is past its size or file count limit, or holds a directory you made unreadable "
 	"or nested too deeply to measure. Delete files you no longer need, or chmod u+rwx the directory.")
 
@@ -126,10 +134,9 @@ class Tools:
 			argv = [self.rg, "--files", "--hidden", "--sort", "path", "-g", pattern, "-g", "!.git"]
 			if include_ignored:
 				argv.append("--no-ignore")
-			argv += ["--", path]
 		else:
 			return self._helper("glob_files", {"pattern": pattern, "path": path})
-		r = self.sandbox.run(argv, timeout=60)
+		r = self.sandbox.run(_rg_in(path, argv), timeout=60)
 		if r.exit_code == 1 and not r.output.strip():
 			return ToolResult("No files matched.")
 		return ToolResult(_format(r, show_exit=r.exit_code not in (0, 1)), r.exit_code not in (0, 1))
@@ -153,8 +160,8 @@ class Tools:
 			argv.append("-i")
 		if context:
 			argv += ["-C", str(int(context))]
-		argv += ["-e", pattern, "--", path]
-		r = self.sandbox.run(argv, timeout=120)
+		argv += ["-e", pattern]
+		r = self.sandbox.run(_rg_in(path, argv) if self.rg else argv + ["--", path], timeout=120)
 		if r.exit_code == 1 and not r.output.strip():
 			return ToolResult("No matches.")
 		return ToolResult(_format(r, show_exit=r.exit_code not in (0, 1)), r.exit_code not in (0, 1))
@@ -165,6 +172,11 @@ class Tools:
 		if not r.scratch_full and self.sandbox.scratch_usage()[0] > SCRATCH_WARN_BYTES:
 			text += f"\n[Warning: /tmp holds over {SCRATCH_WARN_BYTES >> 30} GB. Delete files you no longer need.]"
 		return ToolResult(text, r.exit_code != 0)
+
+
+def _rg_in(path: str, argv: list[str]) -> list[str]:
+	prefix = path.rstrip("/") + "/" if path.rstrip("/") else "/"
+	return ["bash", "-c", RG_IN_DIR, "bash", path, prefix, *argv]
 
 
 def _format(r: Result, show_exit: bool) -> str:
