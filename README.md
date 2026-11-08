@@ -63,3 +63,7 @@ The window size comes from the server. Past 75% of it, old tool outputs are repl
 ## Data
 
 Chats are saved as JSON in `~/.local/share/artifice/chats/`, mode 0600 in a 0700 directory. They contain everything the model read, so treat them as sensitive.
+
+## License
+
+GPLv3. See [LICENSE](LICENSE).
