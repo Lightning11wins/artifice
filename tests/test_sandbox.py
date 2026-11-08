@@ -525,6 +525,50 @@ print("left:", left)
 		r = sb.run(["python3", "-c", code])
 		self.assertEqual(r.output.split("\n"), ["Operation not supported", "0"] * 3 + [""], r.output)
 
+	def test_leases_on_host_files_are_refused(self):
+		# A read lease would make host programs that open the file for writing wait for the lease to break.
+		r = self.py(f"""
+import fcntl, os
+fd = os.open({str(self.host / "file")!r}, os.O_RDONLY)
+try:
+	fcntl.fcntl(fd, fcntl.F_SETLEASE, fcntl.F_RDLCK)
+	print("leased")
+except OSError as e:
+	print(e.strerror)
+""")
+		self.assertEqual(r.output.strip(), "Permission denied", r.output)
+
+	def test_host_sysv_ipc_is_hidden(self):
+		libc = ctypes.CDLL(None, use_errno=True)
+		key = 0x41520000 + os.getpid() % 0x10000
+		queue = libc.msgget(key, 0o1000 | 0o600)  # IPC_CREAT
+		self.assertGreaterEqual(queue, 0, os.strerror(ctypes.get_errno()))
+		try:
+			r = self.py(f"""
+import ctypes
+libc = ctypes.CDLL(None, use_errno=True)
+print(libc.msgget({key}, 0), ctypes.get_errno())
+""")
+		finally:
+			libc.msgctl(queue, 0, None)  # IPC_RMID
+		self.assertEqual(r.output.strip(), "-1 2", r.output)  # ENOENT
+
+	def test_a_scratch_removed_after_mkdir_is_retried(self):
+		scratch = Path(tempfile.mkdtemp(dir=HOST_DIR, prefix="scratch-"))
+		real = artifice.sandbox._open_dir
+		calls = []
+
+		def racy(name, dir_fd=None):
+			if not calls:
+				calls.append(name)
+				os.rmdir(scratch)  # what clean_scratch does between mkdir and open
+			return real(name, dir_fd=dir_fd)
+
+		with mock.patch.object(artifice.sandbox, "_open_dir", racy):
+			sb = Sandbox(READ_ONLY, scratch, str(self.host), exclusive=True)
+		sb.close()
+		self.assertEqual(len(calls), 1)
+
 	def test_deleted_open_files_count_toward_scratch(self):
 		sb = Sandbox(Profile(name="small", scratch_max=16 << 20, file_size_max=8 << 20), self.scratch, str(self.host))
 		r = sb.run(["bash", "-c", "for i in 3 4 5 6 7 8; do eval \"exec $i>/tmp/held$i\"; rm /tmp/held$i; "

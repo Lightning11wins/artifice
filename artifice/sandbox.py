@@ -80,7 +80,10 @@ class Sandbox:
 		"""
 		for _ in range(3):
 			self.scratch.mkdir(mode=0o700, parents=True, exist_ok=True)
-			fd = _open_dir(self.scratch)  # the model may have chmodded its /tmp
+			try:
+				fd = _open_dir(self.scratch)  # the model may have chmodded its /tmp
+			except FileNotFoundError:
+				continue  # clean_scratch removed it after mkdir
 			if exclusive:
 				# clean_scratch locks the parent while it runs, and briefly locks each chat it cleans.
 				parent = os.open(self.scratch.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)

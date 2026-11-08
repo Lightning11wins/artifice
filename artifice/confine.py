@@ -51,14 +51,15 @@ WRITE_RIGHTS_V1 = (FS_WRITE_FILE | FS_REMOVE_DIR | FS_REMOVE_FILE | FS_MAKE_CHAR
 # Seccomp: per-architecture audit value and syscall numbers.
 ARCHES = {
 	"x86_64": {"audit": 0xC000003E, "socket": 41, "open_by_handle_at": 304, "add_key": 248, "request_key": 249,
-		"keyctl": 250, "fallocate": 285, "ioctl": 16},
+		"keyctl": 250, "fallocate": 285, "ioctl": 16, "fcntl": 72},
 	"aarch64": {"audit": 0xC00000B7, "socket": 198, "open_by_handle_at": 265, "add_key": 217, "request_key": 218,
-		"keyctl": 219, "fallocate": 47, "ioctl": 29},
+		"keyctl": 219, "fallocate": 47, "ioctl": 29, "fcntl": 25},
 }
 IO_URING_SYSCALLS = (425, 426, 427)  # setup, enter, register; io_uring can open sockets past seccomp
 X32_SYSCALL_BIT = 0x40000000
 ALLOWED_FAMILIES = (2, 10, 16)  # AF_INET, AF_INET6, AF_NETLINK; all confined by the network namespace
 FALLOC_FL_KEEP_SIZE = 0x01
+F_SETLEASE = 1024
 PREALLOCATE_IOCTLS = (0x40305828, 0x4030582A, 0x40305839)  # FS_IOC_RESVSP, FS_IOC_RESVSP64, FS_IOC_ZERO_RANGE
 
 BPF_LD_W_ABS = 0x20
@@ -145,6 +146,14 @@ def seccomp_program(arch: dict[str, int]) -> bytes:
 	for request in PREALLOCATE_IOCTLS:
 		prog += [jump(BPF_JEQ_K, request, 0, 1), stmt(BPF_RET_K, errno(EOPNOTSUPP))]
 	prog.append(stmt(BPF_LD_W_ABS, 0))
+	# A lease on a host file the user owns would make host programs block in open().
+	prog += [
+		jump(BPF_JEQ_K, arch["fcntl"], 0, 4),
+		stmt(BPF_LD_W_ABS, 24),  # low word of seccomp_data.args[1], the command
+		jump(BPF_JEQ_K, F_SETLEASE, 0, 1),
+		stmt(BPF_RET_K, errno(EACCES)),
+		stmt(BPF_LD_W_ABS, 0),
+	]
 	families = len(ALLOWED_FAMILIES)
 	prog += [
 		jump(BPF_JEQ_K, arch["socket"], 0, families + 2),
