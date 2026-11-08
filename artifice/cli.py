@@ -70,15 +70,17 @@ class TerminalUI:
 		self.out.flush()
 
 	def end_stream(self, tool_calls: bool = False) -> None:
-		if self.state == "answer":
-			out = self.trace if tool_calls else self.out
-			if self.held is not None:
-				out.write("".join(self.held))
-				self.held.clear()
-			out.write("\n")
-			out.flush()
-		elif self.state == "reasoning":
+		if self.state == "reasoning":
 			self.trace.write("\n")
+			self.trace.flush()
+		if self.held:
+			out = self.trace if tool_calls else self.out
+			out.write("".join(self.held) + "\n")
+			out.flush()
+			self.held.clear()
+		elif self.state == "answer":
+			self.out.write("\n")
+			self.out.flush()
 		self.state = None
 
 	def tool_call(self, name: str, arguments: str) -> None:

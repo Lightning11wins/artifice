@@ -649,6 +649,16 @@ class TerminalUITest(unittest.TestCase):
 		self.assertEqual(out.getvalue(), "6.12\n")
 		self.assertIn("Let me check.\n", trace.getvalue())
 
+	def test_one_shot_text_followed_by_reasoning_is_kept(self):
+		out, trace = io.StringIO(), io.StringIO()
+		ui = cli.TerminalUI(answer_out=out, trace_out=trace)
+		for text, calls in (("Let me check.", True), ("6.12", False)):
+			ui.token(text)
+			ui.reasoning("hmm")
+			ui.end_stream(tool_calls=calls)
+		self.assertEqual(out.getvalue(), "6.12\n")
+		self.assertIn("Let me check.\n", trace.getvalue())
+
 	def test_control_characters_are_escaped(self):
 		out = mock.Mock()
 		out.isatty.return_value = False
