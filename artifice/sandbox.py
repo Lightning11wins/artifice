@@ -37,6 +37,7 @@ class Profile:
 	output_max: int = 1 << 20  # bytes of output kept per command
 	scratch_max: int = 4 << 30  # bytes of disk scratch may use; a command past it is killed
 	scratch_files_max: int = 100_000
+	shm_max: int = 1 << 30  # bytes of /dev/shm, which lives in memory
 
 
 READ_ONLY = Profile(name="read-only")
@@ -77,11 +78,18 @@ class Sandbox:
 		for _ in range(3):
 			self.scratch.mkdir(mode=0o700, parents=True, exist_ok=True)
 			fd = os.open(self.scratch, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-			try:
-				fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB if exclusive else fcntl.LOCK_SH)
-			except BlockingIOError:
-				os.close(fd)
-				raise SandboxError(f"Failed to open chat {self.scratch.name}: another Artifice session has it open.")
+			while exclusive:
+				cleaning = _cleaning(self.scratch.parent)
+				try:
+					fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+					break
+				except BlockingIOError:
+					if not cleaning:
+						os.close(fd)
+						raise SandboxError(f"Failed to open chat {self.scratch.name}: another Artifice session has it open.")
+					time.sleep(0.1)  # clean_scratch holds it briefly
+			else:
+				fcntl.flock(fd, fcntl.LOCK_SH)
 			try:
 				if os.path.samestat(os.fstat(fd), os.lstat(self.scratch)):
 					return fd
@@ -120,6 +128,8 @@ class Sandbox:
 			self.bwrap,
 			"--ro-bind", "/", "/",
 			"--dev", "/dev",
+			# Writable shared memory, for multiprocessing and POSIX semaphores.
+			"--perms", "1777", "--size", str(self.profile.shm_max), "--tmpfs", "/dev/shm",
 			# The host's /proc shows every process, but PIDs given to kill or ptrace resolve in the new PID namespace.
 			"--ro-bind", "/proc", "/proc",
 			"--bind", str(self.scratch), "/tmp",
@@ -132,7 +142,7 @@ class Sandbox:
 			cmd += ["--setenv", key, value]
 		for cap in ("CAP_DAC_READ_SEARCH", "CAP_SETUID", "CAP_SETGID", "CAP_SETPCAP"):
 			cmd += ["--cap-add", cap]
-		cwd = self.cwd if os.path.isdir(self.cwd) and not hidden_by_scratch(self.cwd) else home
+		cwd = self.cwd if os.path.isdir(self.cwd) and not hidden_in_sandbox(self.cwd) else home
 		groups = os.getgroups()
 		cmd += ["--chdir", cwd, "--"]
 		cmd += [
@@ -153,7 +163,7 @@ class Sandbox:
 			return
 		if _quiet(["sudo", "-n", "-v"]):
 			return
-		if self._starts_without_password():
+		if self._sudo_runs_sandbox():
 			self._passwordless = True
 			return
 		if not sys.stdin.isatty():
@@ -162,12 +172,16 @@ class Sandbox:
 		if subprocess.run(["sudo", "-v"]).returncode != 0:
 			raise SandboxError("Failed to authenticate with sudo.")
 
-	def _starts_without_password(self) -> bool:
-		"""Whether sudo runs the sandbox command itself without a password, as a narrow NOPASSWD rule allows."""
+	def _sudo_runs_sandbox(self) -> bool:
+		"""Whether sudo runs the sandbox command itself without a password, as a narrow NOPASSWD rule allows.
+
+		A sandbox that fails after sudo let it run still counts, so check() reports the real error.
+		"""
 		try:
-			return subprocess.run(self.command(), input=b'["true"]', capture_output=True, timeout=30).returncode == 0
+			r = subprocess.run(self.command(), input=b'["true"]', capture_output=True, timeout=30)
 		except subprocess.TimeoutExpired:
 			return False
+		return r.returncode == 0 or not r.stderr.startswith(b"sudo:")
 
 	def run(self, argv: list[str], timeout: int | None = None) -> Result:
 		timeout = max(1, min(timeout or self.profile.timeout, self.profile.max_timeout))
@@ -235,8 +249,8 @@ class Sandbox:
 			if not shutil.which(tool):
 				raise SandboxError(f"Failed to find {tool} (package: {package})")
 		for path in (sys.executable, CONFINE):
-			if hidden_by_scratch(path):
-				raise SandboxError(f"Failed to start sandbox: {path} is under /tmp, which the sandbox replaces with scratch")
+			if hidden_in_sandbox(path):
+				raise SandboxError(f"Failed to start sandbox: {path} is under /tmp or /dev, which the sandbox replaces")
 		if not self._systemd:
 			self.notify("systemd is not running, so sandboxed commands have no memory or process limits.")
 		result = self.run(["true"], timeout=30)
@@ -274,9 +288,25 @@ def _quiet(argv: list[str]) -> bool:
 	return subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True).returncode == 0
 
 
-def hidden_by_scratch(path: str) -> bool:
-	"""Whether path is under the host's /tmp, which the sandbox replaces with scratch."""
-	return any(p == "/tmp" or p.startswith("/tmp/") for p in (os.path.abspath(path), os.path.realpath(path)))
+def hidden_in_sandbox(path: str) -> bool:
+	"""Whether path is under the host's /tmp or /dev, which the sandbox replaces with scratch and a private /dev."""
+	return any(p == top or p.startswith(top + "/")
+		for p in (os.path.abspath(path), os.path.realpath(path)) for top in ("/tmp", "/dev"))
+
+
+def _cleaning(root: Path) -> bool:
+	"""Whether clean_scratch is running on root."""
+	try:
+		fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+	except OSError:
+		return False
+	try:
+		fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+		return False
+	except BlockingIOError:
+		return True
+	finally:
+		os.close(fd)
 
 
 def clean_scratch(root: Path, max_age: int = SCRATCH_MAX_AGE) -> None:
@@ -288,6 +318,11 @@ def clean_scratch(root: Path, max_age: int = SCRATCH_MAX_AGE) -> None:
 		root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
 	except OSError:
 		return
+	try:
+		fcntl.flock(root_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # tells chats being opened to wait; see _cleaning
+	except BlockingIOError:
+		os.close(root_fd)
+		return  # another Artifice is cleaning
 	# The walk holds a descriptor per directory level, and scratch trees can be deep.
 	soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
 	if hard == resource.RLIM_INFINITY or hard > soft:

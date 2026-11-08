@@ -4,8 +4,10 @@ Run with: python3 -m unittest discover -s tests -v
 Needs sudo without a password prompt (run `sudo -v` first), and cannot run inside another sandbox.
 """
 import ctypes
+import fcntl
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -332,7 +334,7 @@ except OSError as e:
 		self.assertTrue(r.scratch_full, r.output)
 		self.assertFalse(sb.run(["bash", "-c", "rm -rf /tmp/ddd*"]).scratch_full)
 
-	def test_sigterm_kills_the_running_command(self):
+	def test_sigterm_and_sighup_kill_the_running_command(self):
 		root = Path(__file__).resolve().parent.parent
 		code = f"""
 import sys
@@ -343,13 +345,15 @@ from artifice.sandbox import READ_ONLY, Sandbox
 exit_on_sigterm()
 Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(["sleep", "4279"], timeout=60)
 """
-		parent = subprocess.Popen([sys.executable, "-I", "-c", code])
-		time.sleep(2)
-		parent.terminate()
-		self.assertEqual(parent.wait(10), 143)
-		time.sleep(0.5)
-		left = subprocess.run(["pgrep", "-f", "sleep 427[9]"], capture_output=True, text=True)
-		self.assertEqual(left.stdout, "")
+		for signum in (signal.SIGTERM, signal.SIGHUP):
+			with self.subTest(signal=signum.name):
+				parent = subprocess.Popen([sys.executable, "-I", "-c", code])
+				time.sleep(2)
+				parent.send_signal(signum)
+				self.assertEqual(parent.wait(10), 128 + signum)
+				time.sleep(0.5)
+				left = subprocess.run(["pgrep", "-f", "sleep 427[9]"], capture_output=True, text=True)
+				self.assertEqual(left.stdout, "")
 
 	def test_negative_timeout_is_clamped(self):
 		r = self.sh("sleep 0.2; echo done", timeout=-5)
@@ -364,21 +368,38 @@ Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(["sleep"
 	def test_sudo_probe_runs_the_sandbox_command(self):
 		# A NOPASSWD rule must cover the whole sandbox command, not just bwrap.
 		sb = Sandbox(READ_ONLY, self.scratch, str(self.host))
-		sb.setpriv = "/nonexistent/setpriv"
-		quiet = artifice.sandbox._quiet
-		with mock.patch.object(artifice.sandbox, "_quiet", lambda argv: False if argv[-1] == "-v" else quiet(argv)), \
+		probe = Path(tempfile.mkdtemp(dir=HOST_DIR)) / "probed"
+		sb.command = lambda: ["sh", "-c", f"touch {probe}; echo 'sudo: a password is required' >&2; exit 1"]
+		with mock.patch.object(artifice.sandbox, "_quiet", lambda argv: False), \
 				mock.patch.object(sys.stdin, "isatty", lambda: False):
 			with self.assertRaisesRegex(SandboxError, "needs a password"):
 				sb.ensure_sudo()
+		self.assertTrue(probe.exists())
 		self.assertFalse(sb._passwordless)
 
-	def test_cwd_under_host_tmp(self):
-		tmp = tempfile.mkdtemp(dir="/tmp", prefix="artifice-test-")
-		try:
-			r = Sandbox(READ_ONLY, self.scratch, tmp).run(["pwd"])
-		finally:
-			os.rmdir(tmp)
-		self.assertEqual(r.output.strip(), str(Path.home()), r.output)
+	def test_sandbox_failure_after_sudo_is_not_a_password_error(self):
+		sb = Sandbox(READ_ONLY, self.scratch, str(self.host))
+		sb.setpriv = "/nonexistent/setpriv"
+		with mock.patch.object(artifice.sandbox, "_quiet", lambda argv: False), \
+				mock.patch.object(sys.stdin, "isatty", lambda: False):
+			with self.assertRaisesRegex(SandboxError, "Failed to start sandbox.*setpriv"):
+				sb.check()
+
+	def test_cwd_under_host_tmp_or_dev(self):
+		for top in ("/tmp", "/dev/shm"):
+			with self.subTest(top=top):
+				tmp = tempfile.mkdtemp(dir=top, prefix="artifice-test-")
+				try:
+					r = Sandbox(READ_ONLY, self.scratch, tmp).run(["pwd"])
+				finally:
+					os.rmdir(tmp)
+				self.assertEqual(r.output.strip(), str(Path.home()), r.output)
+
+	def test_dev_shm_is_writable_and_private(self):
+		r = self.sh("python3 -c 'import multiprocessing; multiprocessing.Lock(); print(\"ok\")' && echo x > /dev/shm/artifice-shm-test && ls -ld /dev/shm")
+		self.assertIn("ok", r.output)
+		self.assertRegex(r.output, r"drwxrwxrwt")
+		self.assertFalse(os.path.exists("/dev/shm/artifice-shm-test"))
 
 	def test_timeout_and_background_processes(self):
 		start = time.monotonic()
@@ -418,11 +439,13 @@ Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(["sleep"
 		outside.unlink()
 
 	def test_clean_scratch_handles_deep_trees_with_a_low_fd_limit(self):
-		# Deeper than Python's recursion limit, which recursive walks such as os.fwalk before 3.12.4 hit.
+		# Deeper than Python's recursion limit.
 		root = Path(tempfile.mkdtemp(dir=HOST_DIR, prefix="clean-"))
 		subprocess.run(["bash", "-c", f"cd {root} && mkdir chat && cd chat && for i in $(seq 1500); do mkdir d && cd d; done && echo x > f"],
 			check=True)
-		code = f"import sys; sys.path.insert(0, {str(Path(__file__).resolve().parent.parent)!r}); " \
+		# os.fwalk recurses once per level before Python 3.12.4, so the cleanup must not use it.
+		code = f"import os, sys; sys.path.insert(0, {str(Path(__file__).resolve().parent.parent)!r}); " \
+			f"os.fwalk = lambda *args, **kwargs: (_ for _ in ()).throw(RecursionError('os.fwalk')); " \
 			f"from artifice.sandbox import clean_scratch; clean_scratch(__import__('pathlib').Path({str(root)!r}), max_age=-60)"
 		subprocess.run(["bash", "-c", f"ulimit -Sn 64 && {sys.executable} -I -c \"{code}\""], check=True)
 		self.assertFalse((root / "chat").exists())
@@ -433,6 +456,17 @@ Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(["sleep"
 		with self.assertRaisesRegex(SandboxError, "another Artifice session"):
 			Sandbox(READ_ONLY, scratch, str(self.host), exclusive=True)
 		first.close()
+		Sandbox(READ_ONLY, scratch, str(self.host), exclusive=True)
+
+	def test_opening_a_chat_waits_for_cleanup(self):
+		root = Path(tempfile.mkdtemp(dir=HOST_DIR, prefix="clean-"))
+		scratch = root / "chat"
+		scratch.mkdir()
+		root_fd = os.open(root, os.O_RDONLY)
+		chat_fd = os.open(scratch, os.O_RDONLY)
+		fcntl.flock(root_fd, fcntl.LOCK_EX)
+		fcntl.flock(chat_fd, fcntl.LOCK_EX)
+		threading.Timer(0.5, lambda: (os.close(chat_fd), os.close(root_fd))).start()
 		Sandbox(READ_ONLY, scratch, str(self.host), exclusive=True)
 
 	def test_clean_scratch_enters_read_only_directories(self):

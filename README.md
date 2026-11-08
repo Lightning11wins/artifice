@@ -36,11 +36,11 @@ Every tool call runs as `sudo`, then `systemd-run --scope` (memory and task limi
 
 - **sudo bwrap** starts as root without a user namespace, so the capability it keeps is real on the host. It makes:
   - a read-only bind of `/` at the same paths;
-  - a private `/dev`;
+  - a private `/dev`, with a writable `/dev/shm` for shared memory;
   - the host's `/proc`, read-only, so the model sees every process;
   - new PID, network, IPC, UTS and cgroup namespaces. So there is no network, and PIDs passed to `kill` or `ptrace` resolve in the sandbox, not on the host.
 
-  `/tmp` is the chat's scratch directory, `~/.local/share/artifice/scratch/<chat>`, so the host's `/tmp` is hidden. Scratch is writable and persists for the chat. At startup, Artifice deletes files that have not changed in 48 hours, and then empty directories, from chats that are not open.
+  `/tmp` is the chat's scratch directory, `~/.local/share/artifice/scratch/<chat>`, so the host's `/tmp` is hidden. A chat started under `/tmp` or `/dev` starts in your home directory instead. Scratch is writable and persists for the chat. At startup, Artifice deletes files that have not changed in 48 hours, and then empty directories, from chats that are not open.
 
   The command to run reaches the sandbox on stdin, so sudo logs only the fixed sandbox command line, not what the model ran.
 - **setpriv** drops to your uid, gid and groups and keeps only `CAP_DAC_READ_SEARCH`. That capability lets the model read every file, root-only ones included, and nothing else.
@@ -48,7 +48,7 @@ Every tool call runs as `sudo`, then `systemd-run --scope` (memory and task limi
   - Landlock allows writes only under `/tmp` and the private `/dev`, which blocks writing into FIFOs on the host filesystem. Its ptrace scoping also hides `/proc/PID/environ`, `fd` and `maps` of host processes.
   - seccomp allows only IPv4, IPv6 and netlink sockets, which the network namespace confines. That blocks unix sockets, which would otherwise reach dbus, ssh-agent and gpg-agent through socket files, and families like vsock and Bluetooth that ignore network namespaces. It blocks `open_by_handle_at`, which with the capability opens files by handle, past the sandbox's mounts. It also blocks io_uring and the keyring syscalls.
   - `no_new_privs` stops sudo and setuid binaries.
-- Limits: 120 s default timeout (600 s max), 8 GiB of memory without swap and 512 tasks, 1 GiB per written file, 4 GiB and 100,000 entries in scratch, 1 MiB of output kept per command.
+- Limits: 120 s default timeout (600 s max), 8 GiB of memory without swap and 512 tasks, 1 GiB per written file, 1 GiB in `/dev/shm`, 4 GiB and 100,000 entries in scratch, 1 MiB of output kept per command.
 - Scratch limits are checked every second while a command runs and when it exits, and a directory Artifice cannot read counts as full. A command that finishes within a second can overshoot them; while scratch is over, later commands are killed after a second until the model deletes files. A hard cap would need a disk quota or a dedicated filesystem.
 - Reading still has effects that a read-only sandbox cannot stop. Reading a FIFO takes data meant for its reader, reading `/sys/kernel/tracing/trace_pipe` drains the kernel trace buffer, and a lock taken on a read-only file, such as dpkg's or rpm's lock, makes host programs wait for it until the command ends or times out.
 

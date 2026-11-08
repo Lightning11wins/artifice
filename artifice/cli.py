@@ -11,7 +11,7 @@ from . import deps
 from .agent import Agent, Settings
 from .client import LLMClient, LLMError
 from .prompt import system_prompt
-from .sandbox import READ_ONLY, Sandbox, SandboxError, clean_scratch, hidden_by_scratch
+from .sandbox import READ_ONLY, Sandbox, SandboxError, clean_scratch, hidden_in_sandbox
 from .store import Chat, data_dir, list_chats, scratch_root
 from .tools import ToolResult, Tools, describe_call
 
@@ -132,8 +132,9 @@ def is_command(line: str) -> bool:
 
 
 def exit_on_sigterm() -> None:
-	"""Turns SIGTERM into SystemExit, so cleanup code runs and kills the sandbox's running command."""
-	signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
+	"""Turns SIGTERM and SIGHUP into SystemExit, so cleanup code runs and kills the sandbox's running command."""
+	for signum in (signal.SIGTERM, signal.SIGHUP):
+		signal.signal(signum, lambda signum, frame: sys.exit(128 + signum))
 
 
 def read_input() -> str | None:
@@ -186,12 +187,12 @@ class App:
 	def open_chat(self, chat: Chat) -> None:
 		"""Switches to chat. On failure, the current chat and its settings are unchanged."""
 		model = self.args.model or chat.model
-		context_length = self.context_length if model == self.loaded else self.load_model(model)
 		current = self.agent
 		if current and current.chat.id == chat.id:
 			sandbox = current.tools.sandbox  # this session already holds the chat's lock
 		else:
 			sandbox = Sandbox(READ_ONLY, scratch_root() / chat.id, chat.cwd, notify=self.ui.notice, exclusive=True)
+		context_length = self.context_length if model == self.loaded else self.load_model(model)
 		sandbox.check()
 		self.loaded, self.context_length = model, context_length
 		self.settings.model = chat.model = model
@@ -205,9 +206,9 @@ class App:
 		except FileNotFoundError:
 			cwd = str(Path.home())
 			self.ui.notice(f"The current directory was deleted, so the chat starts in {cwd}.")
-		if hidden_by_scratch(cwd):
+		if hidden_in_sandbox(cwd):
+			self.ui.notice(f"The sandbox hides {cwd}, so the chat starts in {Path.home()} instead.")
 			cwd = str(Path.home())
-			self.ui.notice(f"The sandbox replaces /tmp with scratch, so the chat starts in {cwd} instead.")
 		chat = Chat.new(self.settings.model, READ_ONLY.name, cwd)
 		chat.messages.append({"role": "system", "content": system_prompt(cwd, READ_ONLY.name)})
 		return chat

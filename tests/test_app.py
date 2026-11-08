@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from artifice import cli, deps, helpers  # noqa: E402
 from artifice.agent import Agent, Settings  # noqa: E402
 from artifice.client import LLMError  # noqa: E402
-from artifice.sandbox import SandboxError  # noqa: E402
+from artifice.sandbox import READ_ONLY, Sandbox, SandboxError  # noqa: E402
 from artifice.store import Chat  # noqa: E402
 from artifice.tools import ToolResult  # noqa: E402
 
@@ -165,6 +165,16 @@ class OpenChatTest(TempDataTest):
 				app.open_chat(Chat.new("other", "read-only", "/"))
 		self.assertEqual((app.settings.model, app.loaded, app.context_length), ("good", "good", 2000))
 
+
+	def test_chat_open_elsewhere_does_not_load_its_model(self):
+		app = self.app()
+		app.client.load = mock.Mock()
+		chat = Chat.new("other", "read-only", "/")
+		held = Sandbox(READ_ONLY, cli.scratch_root() / chat.id, "/", exclusive=True)
+		with self.assertRaisesRegex(SandboxError, "another Artifice session"):
+			app.open_chat(chat)
+		app.client.load.assert_not_called()
+		held.close()
 
 	def test_resuming_the_open_chat_keeps_its_sandbox(self):
 		app = self.app()
