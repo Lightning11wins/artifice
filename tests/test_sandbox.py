@@ -301,7 +301,10 @@ except OSError as e:
 		self.assertLess(int(r.output.split()[1]), 32)
 
 	def test_scratch_limits(self):
-		sb = Sandbox(Profile(name="small", scratch_max=20 << 20, scratch_files_max=500), self.scratch, str(self.host))
+		# Its own scratch, so a failure here cannot leave the shared one full.
+		scratch = Path(tempfile.mkdtemp(dir=HOST_DIR, prefix="scratch-"))
+		self.addCleanup(subprocess.run, ["chmod", "-R", "u+rwx", str(scratch)])
+		sb = Sandbox(Profile(name="small", scratch_max=20 << 20, scratch_files_max=500), scratch, str(self.host))
 		r = sb.run(["bash", "-c", "for i in $(seq 30); do head -c 1M /dev/urandom > /tmp/big$i; sleep 0.1; done; echo done"])
 		self.assertTrue(r.scratch_full, r.output)
 		self.assertIsNone(r.exit_code)
@@ -319,6 +322,15 @@ except OSError as e:
 		r = sb.run(["bash", "-c", "mkdir /tmp/hidden && chmod 0 /tmp/hidden"])
 		self.assertTrue(r.scratch_full, r.output)
 		self.assertFalse(sb.run(["bash", "-c", "chmod 700 /tmp/hidden && rmdir /tmp/hidden"]).scratch_full)
+		# So does a directory it can list but not search.
+		r = sb.run(["bash", "-c", "mkdir /tmp/ro && head -c 30M /dev/zero > /tmp/ro/f && chmod 400 /tmp/ro"])
+		self.assertTrue(r.scratch_full, r.output)
+		self.assertFalse(sb.run(["bash", "-c", "chmod 700 /tmp/ro && rm -rf /tmp/ro"]).scratch_full)
+		# And a tree nested past PATH_MAX.
+		deep = "cd /tmp && n=$(printf 'd%.0s' $(seq 200)) && for i in $(seq 25); do mkdir $n && cd $n; done && head -c 30M /dev/zero > f"
+		r = sb.run(["bash", "-c", deep])
+		self.assertTrue(r.scratch_full, r.output)
+		self.assertFalse(sb.run(["bash", "-c", "rm -rf /tmp/ddd*"]).scratch_full)
 
 	def test_sigterm_kills_the_running_command(self):
 		root = Path(__file__).resolve().parent.parent
@@ -404,6 +416,15 @@ Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(["sleep"
 		self.assertTrue(outside.exists())
 		self.assertFalse(chat.exists())
 		outside.unlink()
+
+	def test_clean_scratch_handles_deep_trees_with_a_low_fd_limit(self):
+		root = Path(tempfile.mkdtemp(dir=HOST_DIR, prefix="clean-"))
+		subprocess.run(["bash", "-c", f"cd {root} && mkdir chat && cd chat && for i in $(seq 200); do mkdir d && cd d; done && echo x > f"],
+			check=True)
+		code = f"import sys; sys.path.insert(0, {str(Path(__file__).resolve().parent.parent)!r}); " \
+			f"from artifice.sandbox import clean_scratch; clean_scratch(__import__('pathlib').Path({str(root)!r}), max_age=-60)"
+		subprocess.run(["bash", "-c", f"ulimit -Sn 64 && {sys.executable} -I -c \"{code}\""], check=True)
+		self.assertFalse((root / "chat").exists())
 
 	def test_clean_scratch_enters_read_only_directories(self):
 		root = Path(tempfile.mkdtemp(dir=HOST_DIR, prefix="clean-"))

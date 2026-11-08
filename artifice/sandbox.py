@@ -7,6 +7,7 @@ import errno
 import fcntl
 import json
 import os
+import resource
 import selectors
 import shutil
 import signal
@@ -232,7 +233,10 @@ class Sandbox:
 			self.notify("systemd is not running, so sandboxed commands have no memory or process limits.")
 		result = self.run(["true"], timeout=30)
 		if result.exit_code != 0:
-			raise SandboxError(f"Failed to start sandbox (exit {result.exit_code}): {result.output.strip()}")
+			hint = ""
+			if os.path.isdir("/sys/kernel/security/apparmor"):
+				hint = " If AppArmor confines bwrap (check `sudo aa-status | grep bwrap`), that profile may block it."
+			raise SandboxError(f"Failed to start sandbox (exit {result.exit_code}): {result.output.strip()}{hint}")
 
 	def scratch_full(self) -> bool:
 		"""Whether scratch is past the profile's limits, counting a directory that cannot be read as past them."""
@@ -240,21 +244,21 @@ class Sandbox:
 		return unreadable or size > self.profile.scratch_max or entries > self.profile.scratch_files_max
 
 	def scratch_usage(self) -> tuple[int, int, bool]:
-		"""Disk bytes and entries in scratch, and whether some directory could not be read."""
+		"""Disk bytes and entries in scratch, and whether some entry could not be measured."""
 		size = entries = 0
 		unreadable = False
 
 		def error(e: OSError) -> None:
 			nonlocal unreadable
-			unreadable = unreadable or e.errno in (errno.EACCES, errno.EPERM)
+			unreadable = unreadable or e.errno != errno.ENOENT
 
 		for root, dirs, files in os.walk(self.scratch, onerror=error):
 			for name in files + dirs:
 				entries += 1
 				try:
 					size += os.lstat(os.path.join(root, name)).st_blocks * 512
-				except OSError:
-					pass
+				except OSError as e:
+					error(e)
 		return size, entries, unreadable
 
 
@@ -276,6 +280,10 @@ def clean_scratch(root: Path, max_age: int = SCRATCH_MAX_AGE) -> None:
 		root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
 	except OSError:
 		return
+	# fwalk holds a descriptor per directory level, and scratch trees can be deep.
+	soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+	if hard == resource.RLIM_INFINITY or hard > soft:
+		resource.setrlimit(resource.RLIMIT_NOFILE, (min(hard, 1 << 20), hard))
 	cutoff = time.time() - max_age
 	try:
 		for name in os.listdir(root_fd):

@@ -11,8 +11,8 @@ HELPERS = str(Path(__file__).with_name("helpers.py"))
 OUTPUT_MAX_CHARS = 30000
 OUTPUT_TAIL_CHARS = 8000
 SCRATCH_WARN_BYTES = 2 << 30
-SCRATCH_FULL = ("/tmp is past its size or file count limit, or holds a directory you made unreadable. "
-	"Delete files you no longer need, or chmod u+rwx the directory.")
+SCRATCH_FULL = ("/tmp is past its size or file count limit, or holds a directory you made unreadable "
+	"or nested too deeply to measure. Delete files you no longer need, or chmod u+rwx the directory.")
 
 
 def _schema(name: str, description: str, properties: dict, required: list[str]) -> dict:
