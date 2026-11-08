@@ -55,8 +55,13 @@ class Agent:
 
 	def estimate_tokens(self) -> int:
 		if self.usage_tokens is None:
-			return int(sum(map(_bytes, self.messages)) / self.bytes_per_token)
-		return self.usage_tokens + int(sum(map(_bytes, self.messages[self.usage_n:])) / self.bytes_per_token)
+			return int(self._history_bytes() / self.bytes_per_token)
+		return self.usage_tokens + int(self._history_bytes(self.usage_n) / self.bytes_per_token)
+
+	def _history_bytes(self, start: int = 0) -> int:
+		"""UTF-8 bytes in messages[start:]. Chat templates drop reasoning from turns before the last user message."""
+		last_user = max((i for i, m in enumerate(self.messages) if m["role"] == "user"), default=0)
+		return sum(_bytes(m, reasoning=i > last_user) for i, m in enumerate(self.messages) if i >= start)
 
 	def send(self, text: str) -> None:
 		self._close_open_tool_calls("Artifice stopped before this tool finished.")  # a chat saved mid-tool
@@ -75,7 +80,7 @@ class Agent:
 			self.chat.save()
 
 	def _loop(self) -> None:
-		overflowed = False
+		overflowed_at: int | None = None  # history bytes at the last overflow
 		while True:
 			self.maybe_compact()
 			max_tokens = self._max_tokens()
@@ -84,16 +89,16 @@ class Agent:
 			except LLMError as e:
 				if not _is_overflow(e):
 					raise
-				# The estimate was low. Count the history as full so compaction runs, then retry once.
-				self.bytes_per_token = max(0.5, min(self.bytes_per_token,
-					sum(map(_bytes, self.messages)) / self.context_length))
+				# The estimate was low. Count the history as full so compaction runs, and retry while it shrinks.
+				size = self._history_bytes()
+				self.bytes_per_token = max(0.5, min(self.bytes_per_token, size / self.context_length))
 				self.usage_tokens, self.usage_n = self.context_length, len(self.messages)
-				if overflowed:
+				if overflowed_at is not None and size >= overflowed_at:
 					raise
-				overflowed = True
+				overflowed_at = size
 				self.ui.notice("The conversation is over the context limit. Compacting.")
 				continue
-			overflowed = False
+			overflowed_at = None
 			self.messages.append(message)
 			self.chat.save()
 			if stop_reason == "length":
@@ -259,9 +264,11 @@ def _is_overflow(e: LLMError) -> bool:
 	return "context size" in text or "exceed_context" in text or "context length" in text
 
 
-def _bytes(m: dict) -> int:
+def _bytes(m: dict, reasoning: bool = True) -> int:
 	"""UTF-8 bytes, which track tokens better than characters for text like CJK."""
-	n = len((m.get("content") or "").encode()) + len((m.get("reasoning_content") or "").encode())
+	n = len((m.get("content") or "").encode())
+	if reasoning:
+		n += len((m.get("reasoning_content") or "").encode())
 	if m.get("tool_calls"):
 		n += len(json.dumps(m["tool_calls"]))
 	return n

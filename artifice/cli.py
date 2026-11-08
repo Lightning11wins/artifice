@@ -355,6 +355,8 @@ def _main() -> None:
 			app.agent.send(args.prompt)
 		except LLMError as e:
 			sys.exit(str(e))
+		except BrokenPipeError:
+			raise  # main() exits quietly
 		except OSError as e:
 			sys.exit(f"Failed to finish the turn: {e}")
 		return

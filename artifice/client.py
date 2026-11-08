@@ -26,7 +26,7 @@ class LLMClient:
 				headers={"Content-Type": "application/json"})
 			resp = conn.getresponse()
 			data = resp.read()
-		except (OSError, http.client.HTTPException) as e:
+		except (OSError, http.client.HTTPException, UnicodeError) as e:
 			raise LLMError(f"Failed to reach llm-server at {self.host}:{self.port}: {e!r}") from e
 		finally:
 			conn.close()
@@ -50,7 +50,7 @@ class LLMClient:
 			try:
 				conn.request("POST", "/run", body=json.dumps(body), headers={"Content-Type": "application/json"})
 				resp = conn.getresponse()
-			except (OSError, http.client.HTTPException) as e:
+			except (OSError, http.client.HTTPException, UnicodeError) as e:
 				raise LLMError(f"Failed to reach llm-server at {self.host}:{self.port}: {e!r}") from e
 			if resp.status != 200:
 				try:

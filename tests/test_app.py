@@ -55,14 +55,16 @@ class FakeClient:
 
 
 class OverflowClient(FakeClient):
-	"""Rejects requests over `limit` characters, as a server does past its context."""
+	"""Rejects requests over `limit` tokens, as a server does past its context. A digit is a token, as in Qwen."""
 
 	def __init__(self, limit: int):
 		super().__init__()
 		self.limit = limit
 
 	def stream(self, body):
-		if sum(len(m.get("content") or "") for m in body["messages"]) > self.limit:
+		text = "".join(m.get("content") or "" for m in body["messages"])
+		digits = sum(c.isdigit() for c in text)
+		if digits + (len(text) - digits) / 4 > self.limit:
 			raise LLMError("Failed to generate: the request exceeds the available context size")
 		yield from super().stream(body)
 
@@ -166,12 +168,21 @@ class AgentTest(TempDataTest):
 		self.assertNotIn("1" * 30000, [m["content"] for m in agent.messages])
 
 	def test_context_overflow_from_the_current_turn_elides_it(self):
-		chat = self.chat(("user", "earlier"), ("assistant", "ok"))
-		agent = Agent(OverflowClient(limit=16000), chat, FakeTools(output="1" * 20000), Settings(model="m"),
-			QuietUI(), context_length=16384)
-		agent.client.calls = 1
-		agent.send("go")
-		self.assertEqual(agent.messages[-1]["content"], "done")
+		for earlier in ("ok", "a" * 10000, "a" * 16000):
+			with self.subTest(earlier=len(earlier)):
+				chat = self.chat(("user", "earlier"), ("assistant", earlier))
+				agent = Agent(OverflowClient(limit=16000), chat, FakeTools(output="1" * 20000), Settings(model="m"),
+					QuietUI(), context_length=16384)
+				agent.client.calls = 1
+				agent.send("go")
+				self.assertEqual(agent.messages[-1]["content"], "done")
+
+	def test_estimate_skips_reasoning_before_the_last_user_message(self):
+		chat = self.chat(("user", "earlier"))
+		chat.messages.append({"role": "assistant", "content": "ok", "reasoning_content": "r" * 80000})
+		chat.messages.append({"role": "user", "content": "next"})
+		agent = Agent(FakeClient(), chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=32768)
+		self.assertLess(agent.estimate_tokens(), 100)
 
 	def test_tool_calls_left_open_by_a_crash_are_answered_on_resume(self):
 		chat = self.chat(("user", "go"))
@@ -338,6 +349,16 @@ class CommandTest(TempDataTest):
 		cli.exit_on_sigterm()
 		self.assertEqual(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
 
+	def test_broken_pipe_in_one_shot_mode_reaches_main(self):
+		args = argparse.Namespace(prompt="x", resume=None, cont=False, check_deps=False)
+		app = mock.Mock()
+		app.agent.send.side_effect = BrokenPipeError()
+		with mock.patch.object(cli, "parse_args", return_value=args), \
+				mock.patch.object(cli.deps, "ensure", return_value=True), \
+				mock.patch.object(cli, "clean_scratch"), mock.patch.object(cli, "App", return_value=app):
+			with self.assertRaises(BrokenPipeError):
+				cli._main()
+
 	def test_bad_port_in_the_environment_is_an_argument_error(self):
 		with mock.patch.dict(os.environ, {"LLM_PORT": "abc"}), mock.patch.object(sys, "argv", ["artifice"]), \
 				mock.patch.object(sys, "stderr"), self.assertRaises(SystemExit):
@@ -408,6 +429,8 @@ class ClientTest(unittest.TestCase):
 		from artifice.client import LLMClient
 		with self.assertRaisesRegex(LLMError, "Failed to reach llm-server"):
 			LLMClient("local host", 8741).list()
+		with self.assertRaisesRegex(LLMError, "Failed to reach llm-server"):
+			LLMClient("foo..bar", 8741).list()
 
 
 class DepsTest(TempDataTest):
