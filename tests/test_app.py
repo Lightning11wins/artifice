@@ -109,6 +109,14 @@ class AgentTest(TempDataTest):
 		self.assertEqual(saved[-1]["tool_call_id"], saved[-2]["tool_calls"][0]["id"])
 
 
+	def test_exit_answers_open_tool_calls(self):
+		chat = self.chat()
+		agent = Agent(FakeClient(calls=1), chat, FakeTools(error=SystemExit(143)), Settings(model="m"),
+			QuietUI(), context_length=32768)
+		with self.assertRaises(SystemExit):
+			agent.send("go")
+		self.assertEqual(Chat.load(chat.id).messages[-1]["role"], "tool")
+
 	def test_tool_output_larger_than_the_context_is_elided(self):
 		agent = Agent(FakeClient(calls=1), self.chat(), FakeTools(), Settings(model="m"), QuietUI(), context_length=8192)
 		agent.send("go")
@@ -143,12 +151,32 @@ class OpenChatTest(TempDataTest):
 		self.assertEqual((app.settings.model, app.loaded, app.context_length), ("good", "good", 2000))
 
 
-class CommandTest(unittest.TestCase):
+class CommandTest(TempDataTest):
 	def test_paths_are_messages(self):
 		self.assertTrue(cli.is_command("/resume 2026"))
 		self.assertTrue(cli.is_command("/hlep"))
 		self.assertFalse(cli.is_command("/var/log/syslog has errors, why?"))
+		self.assertFalse(cli.is_command("/etc is huge, why?"))
 		self.assertFalse(cli.is_command("why?"))
+
+	def test_resume_by_path(self):
+		chat = self.chat()
+		chat.save()
+		self.assertEqual(Chat.load(str(chat.path)).id, chat.id)
+		with self.assertRaises(FileNotFoundError):
+			Chat.load("/nonexistent/[x*.json")
+
+	def test_multiline_input(self):
+		with mock.patch("builtins.input", side_effect=['"""Here is the log:', "line 1", '"""']):
+			self.assertEqual(cli.read_input(), "Here is the log:\nline 1")
+		with mock.patch("builtins.input", side_effect=['"""one line"""']):
+			self.assertEqual(cli.read_input(), "one line")
+
+	def test_sampling_arguments_are_validated(self):
+		for flag, value in (("--temperature", "0"), ("--top-p", "0"), ("--top-p", "1.5")):
+			with self.subTest(flag=flag, value=value), mock.patch.object(sys, "argv", ["artifice", flag, value]), \
+					mock.patch.object(sys, "stderr"), self.assertRaises(SystemExit):
+				cli.parse_args()
 
 
 class GlobFallbackTest(unittest.TestCase):
@@ -161,6 +189,8 @@ class GlobFallbackTest(unittest.TestCase):
 			self.assertEqual(names("tests/*.py"), ["tests/b.py"])
 			self.assertEqual(names("*.py"), [".hidden/e.py", "a.py", "tests/b.py", "tests/deep/c.py"])
 			self.assertEqual(helpers.glob_files("*.rs", root), "No files matched.")
+			(Path(root) / "tests" / "loop").symlink_to("..")
+			self.assertEqual(names("**/b.py"), ["tests/b.py"])
 
 
 class DepsTest(TempDataTest):

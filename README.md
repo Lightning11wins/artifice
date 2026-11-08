@@ -14,7 +14,7 @@ bin/artifice -p "question"            # one-shot: answer to stdout, trace to std
 
 The server address comes from `--host`/`--port`, else `$LLM_HOST`/`$LLM_PORT`, else `localhost:8741`. Type `/help` in a chat for commands.
 
-Needs Python 3.12+, `sudo`, `setpriv` (util-linux), `bwrap` (package `bubblewrap`) and, optionally, `rg` (package `ripgrep`). Artifice offers to install missing ones with `apt` or `dnf`.
+Needs Python 3.12+, `sudo`, `setpriv` (util-linux), `bwrap` (package `bubblewrap`) and, optionally, `rg` (package `ripgrep`). Artifice offers to install `bwrap` and `rg` with `apt` or `dnf` when they are missing.
 
 Artifice asks for your sudo password once per session (when sudo's ticket expires, it asks again), because the sandbox starts as root to grant the model read access to every file. See below.
 

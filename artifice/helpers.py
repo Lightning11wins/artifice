@@ -2,9 +2,9 @@
 
 Usage: helpers.py TOOL JSON_ARGS
 """
-import glob
 import json
 import os
+import re
 import stat
 import sys
 
@@ -85,12 +85,42 @@ def glob_files(pattern: str, path: str) -> str:
 	"""Files under path matching pattern, skipping .git. The fallback for glob when rg is missing."""
 	if "/" not in pattern:
 		pattern = f"**/{pattern}"  # like rg, a pattern without a slash matches at any depth
+	regex = _glob_regex(pattern.removeprefix("./"))
 	matches = []
-	for match in glob.iglob(pattern, root_dir=path, recursive=True, include_hidden=True):
-		full = os.path.join(path, match)
-		if ".git" not in match.split(os.sep) and os.path.isfile(full):
-			matches.append(full)
+	for root, dirs, files in os.walk(path):  # does not follow symlinked directories
+		dirs[:] = [d for d in dirs if d != ".git"]
+		for name in files:
+			full = os.path.join(root, name)
+			if regex.match(os.path.relpath(full, path)):
+				matches.append(full)
 	return "\n".join(sorted(matches)) or "No files matched."
+
+
+def _glob_regex(pattern: str) -> re.Pattern:
+	"""Compiles a glob where ** spans directories and *, ? and [...] stay within one."""
+	out = []
+	i = 0
+	while i < len(pattern):
+		if pattern.startswith("**/", i):
+			out.append("(?:.*/)?")
+			i += 3
+		elif pattern.startswith("**", i):
+			out.append(".*")
+			i += 2
+		elif pattern[i] == "*":
+			out.append("[^/]*")
+			i += 1
+		elif pattern[i] == "?":
+			out.append("[^/]")
+			i += 1
+		elif pattern[i] == "[" and (end := pattern.find("]", i + 2)) != -1:
+			body = pattern[i + 1:end].replace("\\", "\\\\")
+			out.append("[" + ("^" + body[1:] if body[0] == "!" else body) + "]")
+			i = end + 1
+		else:
+			out.append(re.escape(pattern[i]))
+			i += 1
+	return re.compile("".join(out) + r"\Z")
 
 
 def _kind(mode: int) -> str:

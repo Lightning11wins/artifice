@@ -26,7 +26,7 @@ HELP = """Commands:
   /reasoning        show or hide the model's thinking
   /usage            show context usage
   /quit             exit (or Ctrl-D)
-Start a line with \"\"\" to type several lines; end with \"\"\" on its own line."""
+Start a message with \"\"\" to type several lines; end it with \"\"\" on its own line."""
 
 
 # Control characters other than tab and newline, which could move the cursor or retitle the terminal.
@@ -92,6 +92,18 @@ class TerminalUI:
 		self.trace.flush()
 
 
+def _positive(text: str) -> float:
+	if not float(text) > 0:
+		raise argparse.ArgumentTypeError(f"{text} is not greater than 0")
+	return float(text)
+
+
+def _probability(text: str) -> float:
+	if not 0 < float(text) <= 1:
+		raise argparse.ArgumentTypeError(f"{text} is not in (0, 1]")
+	return float(text)
+
+
 def parse_args() -> argparse.Namespace:
 	p = argparse.ArgumentParser(prog="artifice", description="Chat with a local model that has read-only access to this computer.")
 	p.add_argument("--model", help=f"model name from `llm list` (default {DEFAULT_MODEL})")
@@ -102,15 +114,21 @@ def parse_args() -> argparse.Namespace:
 	p.add_argument("-p", "--prompt", help="answer one prompt and exit; the answer goes to stdout, the trace to stderr")
 	p.add_argument("--think", choices=["on", "off"], help="force model thinking on or off")
 	p.add_argument("--max-tokens", type=int, default=16384, help="per-response limit, thinking included")
-	p.add_argument("--temperature", type=float, default=0.6)
-	p.add_argument("--top-p", type=float, default=0.95)
+	p.add_argument("--temperature", type=_positive, default=0.6, help="greater than 0")
+	p.add_argument("--top-p", type=_probability, default=0.95, help="greater than 0, at most 1")
 	p.add_argument("--check-deps", action="store_true", help="ask again about optional tools you declined")
 	return p.parse_args()
 
 
+COMMANDS = {"quit", "exit", "q", "help", "new", "chats", "resume", "compact", "think", "reasoning", "usage"}
+
+
 def is_command(line: str) -> bool:
-	"""Slash commands are one word, so a message can start with a path like /var/log."""
-	return line.startswith("/") and "/" not in line.split(maxsplit=1)[0][1:]
+	"""Whether line is a slash command. A message can start with a path like /boot or /var/log."""
+	if not line.startswith("/"):
+		return False
+	word = line.split(maxsplit=1)[0]
+	return word[1:] in COMMANDS or ("/" not in word[1:] and not os.path.exists(word))
 
 
 def exit_on_sigterm() -> None:
@@ -123,9 +141,12 @@ def read_input() -> str | None:
 		line = input("\n\001\033[1;32m\002>\001\033[0m\002 " if sys.stdout.isatty() else "\n> ")
 	except EOFError:
 		return None
-	if line.strip() != '"""':
+	if not line.lstrip().startswith('"""'):
 		return line
-	lines = []
+	first = line.lstrip()[3:]
+	if first.rstrip().endswith('"""'):
+		return first.rstrip()[:-3]
+	lines = [first] if first.strip() else []
 	while True:
 		try:
 			more = input("")

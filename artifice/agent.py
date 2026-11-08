@@ -66,8 +66,8 @@ class Agent:
 			self._close_open_tool_calls("Interrupted by the user before this tool finished.")
 			self.ui.notice("Interrupted.")
 			raise
-		except Exception:
-			self._close_open_tool_calls("Artifice failed before this tool finished.")
+		except BaseException:
+			self._close_open_tool_calls("Artifice stopped before this tool finished.")
 			raise
 		finally:
 			self.chat.save()

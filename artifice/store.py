@@ -1,5 +1,6 @@
 """Chat persistence. Transcripts can hold anything the model read, so files are private to the user."""
 import datetime
+import glob
 import json
 import os
 import secrets
@@ -68,7 +69,8 @@ class Chat:
 
 	@classmethod
 	def load(cls, chat_id: str) -> "Chat":
-		matches = sorted(chats_dir().glob(f"{chat_id}*.json"))
+		chat_id = Path(chat_id).name.removesuffix(".json")  # also accept a chat file's path
+		matches = sorted(chats_dir().glob(f"{glob.escape(chat_id)}*.json"))
 		if not matches:
 			raise FileNotFoundError(f"Failed to find chat {chat_id!r} in {chats_dir()}")
 		if len(matches) > 1:
