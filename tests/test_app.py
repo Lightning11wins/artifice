@@ -380,6 +380,13 @@ class CommandTest(TempDataTest):
 		with mock.patch("builtins.input", side_effect=lambda prompt="": lines.pop(0)), \
 				mock.patch.object(cli, "_input_waiting", lambda: bool(lines)):  # the paste arrives at once
 			self.assertEqual(cli.read_input(), "\n".join(["Why does f fail?", *pasted]))
+		# Bracketed pastes arrive as one input.
+		with mock.patch("builtins.input", side_effect=['"""def f():\n	"""Return x."""', '"""']):
+			self.assertEqual(cli.read_input(), 'def f():\n	"""Return x."""')
+		with mock.patch("builtins.input", side_effect=['"""Module."""\nimport os']):
+			self.assertEqual(cli.read_input(), '"""Module."""\nimport os')
+		with mock.patch("builtins.input", side_effect=['"""Why?\nimport os\n"""']):
+			self.assertEqual(cli.read_input(), "Why?\nimport os")
 		with mock.patch("builtins.input", side_effect=['"""Why?', "if line.startswith('\"\"\"'):", '"""', "next"]):
 			self.assertEqual(cli.read_input(), "Why?\nif line.startswith('\"\"\"'):")
 

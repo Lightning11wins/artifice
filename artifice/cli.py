@@ -147,7 +147,14 @@ def read_input() -> str | None:
 	if not line.lstrip().startswith('"""'):
 		return line
 	first = line.lstrip()[3:]
-	if first.rstrip().endswith('"""'):
+	if "\n" in line:  # a bracketed paste, which can hold whole docstrings
+		head = first.split("\n", 1)[0].rstrip()
+		if head.endswith('"""'):
+			return line  # it opens with a one-line docstring
+		body, _, last = first.rpartition("\n")
+		if last.strip() == '"""':
+			return body
+	elif first.rstrip().endswith('"""'):
 		return first.rstrip()[:-3]
 	lines = [first] if first.strip() else []
 	while True:
