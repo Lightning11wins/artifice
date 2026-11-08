@@ -9,7 +9,7 @@ import stat
 import sys
 
 MAX_LINE = 2000
-MAX_CHARS = 30000
+MAX_CHARS = 29800  # under the tools' 30,000 character cap, with room for the footer
 MAX_ENTRIES = 500
 BINARY_PROBE = 8192
 
@@ -29,19 +29,24 @@ def read_file(path: str, offset: int = 1, limit: int = 2000) -> str:
 	limit = max(1, limit)
 	out: list[str] = []
 	chars = 0
+	full = False
 	last = offset - 1
 	total = 0
 	# Only \n ends a line, as in grep, rg and sed.
 	with open(path, encoding="utf-8", errors="replace", newline="\n") as f:
 		for number, line in enumerate(f, 1):
 			total = number
-			if number < offset or number >= offset + limit or chars >= MAX_CHARS:
+			if number < offset or number >= offset + limit or full:
 				continue
 			line = line.removesuffix("\n").removesuffix("\r")
 			if len(line) > MAX_LINE:
 				line = line[:MAX_LINE] + f" [... line truncated, {len(line)} chars]"
-			out.append(f"{number:>6}\t{line}")
-			chars += len(line) + 8
+			numbered = f"{number:>6}\t{line}"
+			if out and chars + len(numbered) + 1 > MAX_CHARS:
+				full = True
+				continue
+			out.append(numbered)
+			chars += len(numbered) + 1
 			last = number
 	if total == 0:
 		return f"({path} is empty)"
@@ -84,8 +89,12 @@ def list_directory(path: str) -> str:
 
 def glob_files(pattern: str, path: str) -> str:
 	"""Files under path matching pattern, skipping .git. The fallback for glob when rg is missing."""
-	# Like rg, a pattern without a slash matches at any depth.
-	full = pattern.removeprefix("./") if "/" in pattern else f"**/{pattern}"
+	# Like rg, a pattern with a slash is anchored at path, and one without matches at any depth.
+	full = strip_dot_slash(pattern)
+	if full.startswith("/"):
+		full = full[1:]
+	elif "/" not in full:
+		full = f"**/{full}"
 	try:
 		regex = _glob_regex(full)
 	except re.error as e:
@@ -99,6 +108,13 @@ def glob_files(pattern: str, path: str) -> str:
 			if regex.match(os.path.relpath(full, path)):
 				matches.append(full)
 	return "\n".join(sorted(matches)) or "No files matched."
+
+
+def strip_dot_slash(pattern: str) -> str:
+	"""A glob without leading ./, which rg would match literally."""
+	while pattern.startswith("./"):
+		pattern = pattern[2:]
+	return pattern
 
 
 def _glob_regex(pattern: str) -> re.Pattern:

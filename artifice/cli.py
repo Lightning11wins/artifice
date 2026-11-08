@@ -189,14 +189,22 @@ class App:
 		"""Switches to chat. On failure, the current chat and its settings are unchanged."""
 		model = self.args.model or chat.model
 		current = self.agent
+		cwd = chat.cwd
 		if current and current.chat.id == chat.id:
 			sandbox = current.tools.sandbox  # this session already holds the chat's lock
 		else:
-			sandbox = Sandbox(READ_ONLY, scratch_root() / chat.id, chat.cwd, notify=self.ui.notice, exclusive=True)
+			if not os.path.isdir(cwd):
+				cwd = str(Path.home())
+			sandbox = Sandbox(READ_ONLY, scratch_root() / chat.id, cwd, notify=self.ui.notice, exclusive=True)
 		context_length = self.context_length if model == self.loaded else self.load_model(model)
 		sandbox.check()
 		self.loaded, self.context_length = model, context_length
 		self.settings.model = chat.model = model
+		if cwd != chat.cwd:
+			self.ui.notice(f"{chat.cwd} no longer exists, so the chat continues in {cwd}.")
+			chat.cwd = cwd
+			if chat.messages and chat.messages[0]["role"] == "system":
+				chat.messages[0] = {"role": "system", "content": system_prompt(cwd, chat.profile)}
 		self.agent = Agent(self.client, chat, Tools(sandbox), self.settings, self.ui, self.context_length)
 		if current and current.tools.sandbox is not sandbox:
 			current.tools.sandbox.close()

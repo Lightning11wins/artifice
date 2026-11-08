@@ -5,6 +5,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from .helpers import strip_dot_slash
 from .sandbox import Result, Sandbox, SandboxError
 
 HELPERS = str(Path(__file__).with_name("helpers.py"))
@@ -147,7 +148,7 @@ class Tools:
 		path = path or "."
 		if self.rg:
 			# Later globs win in rg, so the .git exclusion goes last.
-			argv = [self.rg, "--files", "--hidden", "--sort", "path", "-g", pattern, "-g", "!.git"]
+			argv = [self.rg, "--files", "--hidden", "--sort", "path", "-g", strip_dot_slash(pattern), "-g", "!.git"]
 			if include_ignored:
 				argv.append("--no-ignore")
 		else:
@@ -160,6 +161,7 @@ class Tools:
 	def _grep_search(self, pattern: str, path: str = ".", include: str = "", ignore_case: bool = False,
 			context: int = 0, include_ignored: bool = False) -> ToolResult:
 		path = path or "."
+		include = strip_dot_slash(include or "")
 		if self.rg:
 			argv = [self.rg, "--line-number", "--with-filename", "--no-heading", "--color=never", "--hidden",
 				"--sort", "path", "--max-columns", "400", "--max-columns-preview"]

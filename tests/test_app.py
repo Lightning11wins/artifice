@@ -165,6 +165,14 @@ class AgentTest(TempDataTest):
 		self.assertEqual(agent.messages[-1]["content"], "done")
 		self.assertNotIn("1" * 30000, [m["content"] for m in agent.messages])
 
+	def test_context_overflow_from_the_current_turn_elides_it(self):
+		chat = self.chat(("user", "earlier"), ("assistant", "ok"))
+		agent = Agent(OverflowClient(limit=16000), chat, FakeTools(output="1" * 20000), Settings(model="m"),
+			QuietUI(), context_length=16384)
+		agent.client.calls = 1
+		agent.send("go")
+		self.assertEqual(agent.messages[-1]["content"], "done")
+
 	def test_tool_calls_left_open_by_a_crash_are_answered_on_resume(self):
 		chat = self.chat(("user", "go"))
 		chat.messages.append({"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",
@@ -242,6 +250,19 @@ class OpenChatTest(TempDataTest):
 			app.open_chat(chat)
 			app.open_chat(chat)
 		self.assertEqual(sandbox.call_count, 1)
+
+	def test_resuming_a_chat_whose_directory_was_deleted_continues_at_home(self):
+		app = self.app()
+		app.ui = QuietUI()
+		gone = tempfile.mkdtemp()
+		chat = Chat.new("good", "read-only", gone)
+		chat.messages = [{"role": "system", "content": f"cwd {gone}"}]
+		os.rmdir(gone)
+		with mock.patch.object(cli, "Sandbox") as sandbox:
+			app.open_chat(chat)
+		self.assertEqual(sandbox.call_args.args[2], str(Path.home()))
+		self.assertEqual(chat.cwd, str(Path.home()))
+		self.assertNotIn(gone, chat.messages[0]["content"])
 
 	def test_new_chat_in_a_deleted_directory_starts_at_home(self):
 		app = self.app()
@@ -344,8 +365,19 @@ class GlobFallbackTest(unittest.TestCase):
 			self.assertRegex(helpers.glob_files("[z-a]", root), "^Error: bad glob pattern")
 			with self.assertRaises(FileNotFoundError):
 				helpers.glob_files("*.py", os.path.join(root, "missing"))
+			self.assertEqual(names("./tests/*.py"), ["tests/b.py"])
+			self.assertEqual(names("/tests/*.py"), ["tests/b.py"])
 			(Path(root) / "tests" / "loop").symlink_to("..")
 			self.assertEqual(names("**/b.py"), ["tests/b.py"])
+
+	def test_leading_dot_slash_is_stripped_for_rg(self):
+		with mock.patch.object(tools.shutil, "which", return_value="/usr/bin/rg"):
+			t = tools.Tools(mock.Mock())
+		t.sandbox.run.return_value = Result(output="", exit_code=1)
+		t.call("glob", json.dumps({"pattern": "./src/**/*.py"}))
+		t.call("grep_search", json.dumps({"pattern": "x", "include": "./*.py"}))
+		globs = [argv[argv.index("-g") + 1] for (argv,), _ in t.sandbox.run.call_args_list]
+		self.assertEqual(globs, ["src/**/*.py", "*.py"])
 
 	def test_schemas_without_rg_do_not_offer_gitignore(self):
 		from artifice.tools import schemas
@@ -360,6 +392,22 @@ class ReadFileTest(unittest.TestCase):
 			f.write(b"p 10%\rp 100%\nERROR\r\n")
 			f.flush()
 			self.assertIn("     2\tERROR\n", helpers.read_file(f.name) + "\n")
+
+	def test_output_fits_the_tool_cap_with_whole_lines(self):
+		with tempfile.NamedTemporaryFile("w") as f:
+			f.write(("x" * 1999 + "\n") * 20)
+			f.flush()
+			text = helpers.read_file(f.name)
+		self.assertLessEqual(len(text), tools.OUTPUT_MAX_CHARS)
+		last = int(text.split("Use offset=")[1].split(" ")[0]) - 1
+		self.assertEqual(text.count("x" * 1999), last)
+
+
+class ClientTest(unittest.TestCase):
+	def test_bad_host_is_an_llm_error(self):
+		from artifice.client import LLMClient
+		with self.assertRaisesRegex(LLMError, "Failed to reach llm-server"):
+			LLMClient("local host", 8741).list()
 
 
 class DepsTest(TempDataTest):

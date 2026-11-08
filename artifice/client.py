@@ -14,7 +14,10 @@ class LLMClient:
 		self.port = port
 
 	def _connect(self, timeout: float | None) -> http.client.HTTPConnection:
-		return http.client.HTTPConnection(self.host, self.port, timeout=timeout)
+		try:
+			return http.client.HTTPConnection(self.host, self.port, timeout=timeout)
+		except (http.client.HTTPException, ValueError) as e:  # such as a host with a space in it
+			raise LLMError(f"Failed to reach llm-server at {self.host}:{self.port}: {e!r}") from e
 
 	def _request(self, method: str, path: str, body: dict | None = None, timeout: float | None = 30) -> object:
 		conn = self._connect(timeout)

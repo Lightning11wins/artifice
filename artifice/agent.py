@@ -47,6 +47,7 @@ class Agent:
 		# Tokens in messages[:usage_n] per the server's last usage report.
 		self.usage_tokens: int | None = None
 		self.usage_n = 0
+		self.bytes_per_token = BYTES_PER_TOKEN  # lowered when the server rejects a request as too long
 
 	@property
 	def messages(self) -> list[dict]:
@@ -54,8 +55,8 @@ class Agent:
 
 	def estimate_tokens(self) -> int:
 		if self.usage_tokens is None:
-			return int(sum(map(_bytes, self.messages)) / BYTES_PER_TOKEN)
-		return self.usage_tokens + int(sum(map(_bytes, self.messages[self.usage_n:])) / BYTES_PER_TOKEN)
+			return int(sum(map(_bytes, self.messages)) / self.bytes_per_token)
+		return self.usage_tokens + int(sum(map(_bytes, self.messages[self.usage_n:])) / self.bytes_per_token)
 
 	def send(self, text: str) -> None:
 		self._close_open_tool_calls("Artifice stopped before this tool finished.")  # a chat saved mid-tool
@@ -84,6 +85,8 @@ class Agent:
 				if not _is_overflow(e):
 					raise
 				# The estimate was low. Count the history as full so compaction runs, then retry once.
+				self.bytes_per_token = max(0.5, min(self.bytes_per_token,
+					sum(map(_bytes, self.messages)) / self.context_length))
 				self.usage_tokens, self.usage_n = self.context_length, len(self.messages)
 				if overflowed:
 					raise
