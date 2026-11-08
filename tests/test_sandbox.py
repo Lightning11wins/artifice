@@ -299,6 +299,13 @@ print("ok")
 			r = self.py("import ctypes; libc = ctypes.CDLL(None, use_errno=True); print(libc.syscall(253), ctypes.get_errno())")
 			self.assertEqual(r.output.split(), ["-1", "38"], r.output)
 
+	def test_posix_message_queues_cannot_be_created(self):
+		# Queue bytes count against a per-user limit that host programs share; Landlock refuses the create.
+		nr = {"x86_64": 240, "aarch64": 180}[os.uname().machine]
+		r = self.py(f"import ctypes; libc = ctypes.CDLL(None, use_errno=True); "
+			f"print(libc.syscall({nr}, b'artifice', 0o100 | 2, 0o600, None), ctypes.get_errno())")
+		self.assertEqual(r.output.split(), ["-1", "13"], r.output)  # EACCES
+
 	def test_other_syscall_abis_are_killed(self):
 		if os.uname().machine != "x86_64":
 			self.skipTest("x86_64 only")
