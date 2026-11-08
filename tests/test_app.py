@@ -375,9 +375,13 @@ class CommandTest(TempDataTest):
 			self.assertEqual(cli.read_input(), "Here is the log:\nline 1")
 		with mock.patch("builtins.input", side_effect=['"""one line"""']):
 			self.assertEqual(cli.read_input(), "one line")
-		pasted = ['"""Module doc.', "", "More.", '"""', "def f():", '	"""Return x.', '	"""', "	return x"]
-		with mock.patch("builtins.input", side_effect=['"""Why does f fail?', *pasted, '"""']):
+		pasted = ['"""', "Module doc.", '"""', "def f():", '	"""', "	Return x.", '	"""', "	return x"]
+		lines = ['"""Why does f fail?', *pasted, '"""']
+		with mock.patch("builtins.input", side_effect=lambda prompt="": lines.pop(0)), \
+				mock.patch.object(cli, "_input_waiting", lambda: bool(lines)):  # the paste arrives at once
 			self.assertEqual(cli.read_input(), "\n".join(["Why does f fail?", *pasted]))
+		with mock.patch("builtins.input", side_effect=['"""Why?', "if line.startswith('\"\"\"'):", '"""', "next"]):
+			self.assertEqual(cli.read_input(), "Why?\nif line.startswith('\"\"\"'):")
 
 	def test_nohup_is_kept(self):
 		old = signal.signal(signal.SIGHUP, signal.SIG_IGN)

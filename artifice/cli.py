@@ -3,6 +3,7 @@ import argparse
 import os
 import re
 import readline
+import select
 import signal
 import sys
 from pathlib import Path
@@ -154,11 +155,19 @@ def read_input() -> str | None:
 			more = input("")
 		except EOFError:
 			break
-		# An odd count means this closes a docstring opened in pasted code.
-		if more.strip() == '"""' and sum(x.count('"""') for x in lines) % 2 == 0:
+		# Terminals with bracketed paste deliver a paste as one line; others leave the rest of it waiting.
+		if more.strip() == '"""' and not _input_waiting():
 			break
 		lines.append(more)
 	return "\n".join(lines)
+
+
+def _input_waiting() -> bool:
+	"""Whether more of a paste is waiting on the terminal, so a \"\"\" line belongs to the pasted text."""
+	try:
+		return sys.stdin.isatty() and bool(select.select([sys.stdin], [], [], 0)[0])
+	except (OSError, ValueError):
+		return False
 
 
 class App:
