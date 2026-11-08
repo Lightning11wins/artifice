@@ -283,6 +283,24 @@ print("ok")
 		r = self.py(code)
 		self.assertEqual(r.output.split(), ["-1/38"] * 5, r.output)  # ENOSYS from seccomp
 
+	def test_other_syscall_abis_are_killed(self):
+		if os.uname().machine != "x86_64":
+			self.skipTest("x86_64 only")
+		code = (
+			"import ctypes, mmap, sys\n"
+			"libc = ctypes.CDLL(None, use_errno=True)\n"
+			"if sys.argv[1] == 'x32':\n"
+			"	print(libc.syscall(0x40000000 | 39), flush=True)\n"
+			"else:\n"
+			"	buf = mmap.mmap(-1, 4096, prot=mmap.PROT_READ | mmap.PROT_WRITE | mmap.PROT_EXEC)\n"
+			"	buf.write(b'\\xb8\\x14\\x00\\x00\\x00\\xcd\\x80\\xc3')  # mov eax, 20 (i386 getpid); int 0x80; ret\n"
+			"	print(ctypes.CFUNCTYPE(ctypes.c_int)(ctypes.addressof(ctypes.c_char.from_buffer(buf)))(), flush=True)\n"
+		)
+		for abi in ("x32", "i386"):
+			with self.subTest(abi=abi):
+				r = self.sh(f"python3 -I -c {shlex.quote(code)} {abi} 2>/dev/null; echo $?")
+				self.assertEqual(r.output.split()[-1], "159", r.output)  # SIGSYS
+
 	def test_memory_and_task_limits(self):
 		sb = Sandbox(Profile(name="small", memory_max="64M", tasks_max=32), self.scratch, str(self.host))
 		if not sb._systemd:
@@ -408,6 +426,20 @@ print("left:", left)
 				r = subprocess.run(["script", "-qec", shlex.join(argv), "/dev/null"] if terminal else argv,
 					stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
 				self.assertIn("left: []", r.stdout, r.stdout + r.stderr)
+
+	def test_a_sandbox_interrupted_while_starting_does_not_outlive_it(self):
+		# bwrap starting late leaves a window before --die-with-parent applies.
+		wrapper = Path(tempfile.mkdtemp(dir=HOST_DIR)) / "slow-bwrap"
+		wrapper.write_text(f"#!/bin/sh\nsleep 2\nexec {self.sb.bwrap} \"$@\"\n")
+		wrapper.chmod(0o755)
+		sb = Sandbox(READ_ONLY, self.scratch, str(self.host))
+		sb.bwrap = str(wrapper)
+		sb.run(["sleep", "4303"], timeout=1)
+		time.sleep(4)
+		left = subprocess.run(["pgrep", "-x", "-f", "sleep 4303"], capture_output=True, text=True).stdout.split()
+		for pid in left:
+			os.kill(int(pid), signal.SIGKILL)
+		self.assertEqual(left, [])
 
 	def test_file_size_limit_and_default_signals(self):
 		sb = Sandbox(Profile(name="small", file_size_max=1 << 20), self.scratch, str(self.host))
@@ -630,6 +662,38 @@ print("left:", left)
 		(root / "chat").chmod(0o555)
 		clean_scratch(root, max_age=-60)
 		self.assertFalse((root / "chat").exists())
+
+	def test_a_chat_whose_tmp_the_model_chmodded_reopens_and_cleans(self):
+		root = Path(tempfile.mkdtemp(dir=HOST_DIR, prefix="clean-"))
+		self.addCleanup(subprocess.run, ["chmod", "-R", "u+rwx", str(root)])
+		sb = Sandbox(READ_ONLY, root / "chat", str(self.host), exclusive=True)
+		sb.run(["bash", "-c", "touch /tmp/old; chmod 0 /tmp"])
+		sb.close()
+		Sandbox(READ_ONLY, root / "chat", str(self.host), exclusive=True).close()
+		(root / "chat").chmod(0)
+		clean_scratch(root, max_age=-60)
+		self.assertFalse((root / "chat").exists())
+
+	def test_clean_scratch_does_not_chmod_through_a_swapped_symlink(self):
+		root = Path(tempfile.mkdtemp(dir=HOST_DIR, prefix="clean-"))
+		outside = Path(tempfile.mkdtemp(dir=HOST_DIR, prefix="outside-"))
+		self.addCleanup(subprocess.run, ["chmod", "-R", "u+rwx", str(root), str(outside)])
+		(root / "chat" / "d").mkdir(parents=True)
+		(root / "chat" / "d").chmod(0o500)
+		outside.chmod(0o500)
+		real_stat = os.stat
+
+		def swap_after_stat(name, *args, **kwargs):
+			# A command still running from a killed session swaps the directory for a symlink right after the check.
+			st = real_stat(name, *args, **kwargs)
+			if name == "d":
+				os.rename(root / "chat" / "d", root / "chat" / "moved")
+				os.symlink(outside, root / "chat" / "d")
+			return st
+
+		with mock.patch.object(artifice.sandbox.os, "stat", swap_after_stat):
+			clean_scratch(root, max_age=-60)
+		self.assertEqual(outside.stat().st_mode & 0o777, 0o500)
 
 	def test_clean_scratch_skips_open_chats_and_counts_from_ctime(self):
 		root = Path(tempfile.mkdtemp(dir=HOST_DIR, prefix="clean-"))

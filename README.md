@@ -32,7 +32,7 @@ Each tool call runs in its own sandbox. Output over 30,000 characters is cut dow
 
 ## Sandbox
 
-Every tool call runs as `sudo`, then `timeout` (a backstop that kills the sandbox 10 s after the command's timeout), then `systemd-run --scope` (memory and task limits, when systemd runs), then `bwrap`, then `unshare`, then `setpriv`, then `confine.py`, then the command.
+Every tool call runs as `sudo`, then `timeout` (a backstop that kills the sandbox 10 s after the command's timeout) and `setpriv --pdeathsig`, which ties the rest to it, then `systemd-run --scope` (memory and task limits, when systemd runs), then `bwrap`, then `unshare`, then `setpriv`, then `confine.py`, then the command.
 
 - **sudo bwrap** starts as root without a user namespace, so the capability it keeps is real on the host. It makes:
   - a read-only bind of `/` at the same paths;
@@ -51,7 +51,7 @@ Every tool call runs as `sudo`, then `timeout` (a backstop that kills the sandbo
   - `no_new_privs` stops sudo and setuid binaries.
 - Limits: 120 s default timeout (600 s max; if Artifice itself is killed, the sandbox ends 10 s after the timeout), 8 GiB of memory without swap and 512 tasks, 1 GiB per written file, 1 GiB in `/dev/shm`, 4 GiB and 100,000 entries in scratch, 1 MiB of output kept per command.
 - Scratch limits are checked every second while a command runs and when it exits, and a directory Artifice cannot read counts as full. Disk use counts deleted files that a command keeps open, through the free space of scratch's filesystem, so other writes to that filesystem during a command count too. A command can overshoot the limits by what it writes in a second; while scratch is over, later commands are killed after a second until the model deletes files. A hard cap would need a disk quota or a dedicated filesystem.
-- Reading still has effects that a read-only sandbox cannot stop. Reading a FIFO takes data meant for its reader, reading `/sys/kernel/tracing/trace_pipe` drains the kernel trace buffer, and a lock taken on a read-only file, such as dpkg's or rpm's lock, makes host programs wait for it until the command ends or times out. Reading an automount point mounts it on the host, though that first read fails in the sandbox, whose mounts are private. A command that crashes reaches the host's crash reporter, if one is set up.
+- Reading still has effects that a read-only sandbox cannot stop. Reading a FIFO takes data meant for its reader, reading `/sys/kernel/tracing/trace_pipe` drains the kernel trace buffer, and a lock taken on a read-only file, such as dpkg's or rpm's lock, makes host programs wait for it until the command ends or times out. A filesystem the host unmounts during a command stays mounted in the sandbox until the command ends, so its device stays busy. Reading an automount point mounts it on the host, though that first read fails in the sandbox, whose mounts are private. A command that crashes reaches the host's crash reporter, if one is set up.
 
 The escape tests in `tests/test_sandbox.py` try each of these and must all fail to change anything. `tests/test_app.py` covers the agent loop and CLI with a fake server. The escape tests need sudo without a password prompt, so run `sudo -v` first, and run them outside any other sandbox:
 

@@ -80,7 +80,7 @@ class Sandbox:
 		"""
 		for _ in range(3):
 			self.scratch.mkdir(mode=0o700, parents=True, exist_ok=True)
-			fd = os.open(self.scratch, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+			fd = _open_dir(self.scratch)  # the model may have chmodded its /tmp
 			if exclusive:
 				# clean_scratch locks the parent while it runs, and briefly locks each chat it cleans.
 				parent = os.open(self.scratch.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
@@ -122,7 +122,9 @@ class Sandbox:
 		# timeout runs as root outside the sandbox, so it ends the sandbox even if Artifice was killed.
 		# It dies with its parent, sudo or, under use_pty, sudo's monitor process, which kills it when sudo dies.
 		# bwrap dies with it through --die-with-parent.
-		cmd = ["sudo", "-n", self.setpriv, "--pdeathsig", "KILL", self.timeout, "--foreground", "-s", "KILL", str(deadline)]
+		# The second setpriv makes the rest of the chain die with timeout, before bwrap's --die-with-parent applies.
+		cmd = ["sudo", "-n", self.setpriv, "--pdeathsig", "KILL", self.timeout, "--foreground", "-s", "KILL", str(deadline),
+			self.setpriv, "--pdeathsig", "KILL"]
 		if self._systemd:
 			# A system scope, because sudo's PAM session can move it out of a user scope.
 			cmd += [
@@ -334,7 +336,7 @@ def clean_scratch(root: Path, max_age: int = SCRATCH_MAX_AGE) -> None:
 	try:
 		for name in os.listdir(root_fd):
 			try:
-				fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root_fd)
+				fd = _open_dir(name, dir_fd=root_fd)
 			except OSError:
 				continue
 			try:
@@ -349,13 +351,26 @@ def clean_scratch(root: Path, max_age: int = SCRATCH_MAX_AGE) -> None:
 		os.close(root_fd)
 
 
+def _open_dir(name: str | Path, dir_fd: int | None = None) -> int:
+	"""Opens a directory without following symlinks, first giving its owner the rwx needed to list and empty it.
+
+	The chmod goes through an O_PATH descriptor, so a directory swapped for a symlink cannot redirect it.
+	"""
+	path_fd = os.open(name, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+	try:
+		mode = os.fstat(path_fd).st_mode
+		if mode & 0o700 != 0o700:
+			os.chmod(f"/proc/self/fd/{path_fd}", stat.S_IMODE(mode) | 0o700)
+		return os.open(f"/proc/self/fd/{path_fd}", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+	finally:
+		os.close(path_fd)
+
+
 def _clean_dir(top_fd: int, cutoff: float) -> None:
 	"""Deletes old files and then empty directories under top_fd, without following symlinks.
 
 	The walk keeps its own stack because scratch trees can be thousands of levels deep.
 	"""
-	# Directories need owner write and search for their entries to be deleted.
-	os.fchmod(top_fd, os.fstat(top_fd).st_mode | 0o700)
 	stack = [(top_fd, iter(os.listdir(top_fd)), "")]
 	try:
 		while stack:
@@ -373,9 +388,7 @@ def _clean_dir(top_fd: int, cutoff: float) -> None:
 			try:
 				st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
 				if stat.S_ISDIR(st.st_mode):
-					if st.st_mode & 0o700 != 0o700:
-						os.chmod(name, st.st_mode | 0o700, dir_fd=dir_fd)
-					fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+					fd = _open_dir(name, dir_fd=dir_fd)
 					try:
 						stack.append((fd, iter(os.listdir(fd)), name))
 					except OSError:
