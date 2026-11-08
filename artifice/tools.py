@@ -25,10 +25,11 @@ RG_IN_DIR = (
 	'| grep -qxF -- "./$(basename -- "$dir")" || exit 1; '
 	'fi; exec "$@" -- "$dir"; fi; '
 	'cd -- "$dir" || exit 2; set -o pipefail; '
+	# Flushing each line keeps the results found so far when a timeout kills the search.
 	'"$@" -- . 2>&1 | prefix="$prefix" awk \''
-	'sub(/^\\.\\//, "") { print ENVIRON["prefix"] $0; next } '
-	'sub(/^rg: \\.\\//, "") { print "rg: " ENVIRON["prefix"] $0; next } '
-	'{ print }\''
+	'sub(/^\\.\\//, "") { print ENVIRON["prefix"] $0; fflush(); next } '
+	'sub(/^rg: \\.\\//, "") { print "rg: " ENVIRON["prefix"] $0; fflush(); next } '
+	'{ print; fflush() }\''
 )
 SCRATCH_FULL = ("/tmp is past its size or file count limit, or holds a directory you made unreadable "
 	"or nested too deeply to measure. Delete files you no longer need, or chmod u+rwx the directory.")
@@ -154,7 +155,7 @@ class Tools:
 		path = path or "."
 		if self.rg:
 			# Later globs win in rg, so the .git exclusion goes last.
-			argv = [self.rg, "--files", "--hidden", "--sort", "path", "-g", strip_dot_slash(pattern), "-g", "!.git"]
+			argv = [self.rg, "--files", "--line-buffered", "--hidden", "--sort", "path", "-g", strip_dot_slash(pattern), "-g", "!.git"]
 			if include_ignored:
 				argv.append("--no-ignore")
 		else:
@@ -169,7 +170,7 @@ class Tools:
 		path = path or "."
 		include = strip_dot_slash(include or "")
 		if self.rg:
-			argv = [self.rg, "--line-number", "--with-filename", "--no-heading", "--color=never", "--hidden",
+			argv = [self.rg, "--line-buffered", "--line-number", "--with-filename", "--no-heading", "--color=never", "--hidden",
 				"--sort", "path", "--max-columns", "400", "--max-columns-preview"]
 			if include:
 				argv += ["-g", include]
@@ -177,7 +178,7 @@ class Tools:
 			if include_ignored:
 				argv.append("--no-ignore")
 		else:
-			argv = ["grep", "-rnHE", "--binary-files=without-match", "--exclude-dir=.git"]
+			argv = ["grep", "-rnHE", "--line-buffered", "--binary-files=without-match", "--exclude-dir=.git"]
 			if include:
 				argv.append(f"--include={include}")
 		if ignore_case:

@@ -457,6 +457,36 @@ class GlobFallbackTest(unittest.TestCase):
 			self.assertIn(f"{path}:1:needle", t.call("grep_search", json.dumps({**grep, "include": "*.txt"})).text)
 			self.assertIn(f"{path}:1:needle", t.call("grep_search", json.dumps(grep)).text)
 
+	def test_a_timed_out_search_keeps_what_it_found(self):
+		def run(argv, timeout=None, **kw):
+			p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+			try:
+				out, _ = p.communicate(timeout=2)
+				return Result(output=out.decode(), exit_code=p.returncode)
+			except subprocess.TimeoutExpired:
+				os.killpg(p.pid, signal.SIGKILL)  # what Sandbox.run does at the timeout
+				out, _ = p.communicate()
+				return Result(output=out.decode(), exit_code=None, timed_out=True)
+
+		with tempfile.TemporaryDirectory() as d:
+			# A search that finds a match and then stalls, as on a slow mount or a blocking file.
+			stub = Path(d, "rg")
+			stub.write_text('#!/bin/bash\nfor a; do [ "$a" = --files ] && echo ./a.txt; done\necho ./a.txt:1:needle\nsleep 30\n')
+			stub.chmod(0o755)
+			fifo = os.path.join(d, "fifo")
+			os.mkfifo(fifo)
+			stall = Path(d, "grep")
+			stall.write_text(f'#!/bin/bash\nexec {shutil.which("grep")} "$@" {fifo}\n')  # blocks opening the FIFO
+			stall.chmod(0o755)
+			Path(d, "a.txt").write_text("needle\n")
+			for rg in (str(stub), None):
+				with self.subTest(rg=rg), mock.patch.dict(os.environ, {"PATH": f"{d}:{os.environ['PATH']}"}):
+					with mock.patch.object(tools.shutil, "which", return_value=rg):
+						t = tools.Tools(mock.Mock())
+					t.sandbox.run.side_effect = run
+					out = t.call("grep_search", json.dumps({"pattern": "needle", "path": d})).text
+					self.assertIn("a.txt:1:needle", out)
+
 	def test_schemas_without_rg_do_not_offer_gitignore(self):
 		from artifice.tools import schemas
 		text = str(schemas(False))
