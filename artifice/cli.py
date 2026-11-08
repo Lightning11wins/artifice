@@ -300,6 +300,9 @@ class App:
 		except LLMError as e:
 			self.ui.notice(str(e))
 			return
+		except OSError as e:
+			self.ui.notice(f"Failed to save the chat: {e}")  # such as a full disk
+			return
 		except KeyboardInterrupt:
 			return
 		used = self.agent.estimate_tokens()

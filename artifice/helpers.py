@@ -90,6 +90,7 @@ def glob_files(pattern: str, path: str) -> str:
 		regex = _glob_regex(full)
 	except re.error as e:
 		return f"Error: bad glob pattern {pattern}: {e}"
+	os.listdir(path)  # reports a missing or unreadable path, which os.walk would skip
 	matches = []
 	for root, dirs, files in os.walk(path):  # does not follow symlinked directories
 		dirs[:] = [d for d in dirs if d != ".git"]

@@ -117,8 +117,11 @@ class Tools:
 		for key, value in args.items():
 			if value is None and key not in required:
 				continue  # optional arguments sent as null take their defaults
-			if properties.get(key, {}).get("type") == "string" and not isinstance(value, str):
+			kind = properties.get(key, {}).get("type")
+			if kind == "string" and not isinstance(value, str):
 				return ToolResult(f"Error: bad arguments for {name}: {key} must be a string, not {value!r}", True)
+			if kind == "boolean" and not isinstance(value, bool):
+				return ToolResult(f"Error: bad arguments for {name}: {key} must be true or false, not {value!r}", True)
 		try:
 			result = method(**args)
 		except (TypeError, ValueError, OverflowError) as e:

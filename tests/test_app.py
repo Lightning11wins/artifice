@@ -178,6 +178,14 @@ class OpenChatTest(TempDataTest):
 		app.client.load.assert_not_called()
 		held.close()
 
+	def test_full_disk_during_a_turn_is_reported(self):
+		app = self.app()
+		app.ui = QuietUI()
+		app.agent = mock.Mock()
+		app.agent.send.side_effect = OSError(28, "No space left on device")
+		app.turn("hi")
+		self.assertIn("Failed to save the chat", " ".join(app.ui.notices))
+
 	def test_resuming_the_open_chat_keeps_its_sandbox(self):
 		app = self.app()
 		chat = Chat.new("good", "read-only", "/")
@@ -206,6 +214,12 @@ class ToolsTest(unittest.TestCase):
 				result = t.call("glob", json.dumps({"pattern": "*.py", "path": path}))
 				self.assertTrue(result.error)
 				self.assertIn("path must be a string", result.text)
+
+	def test_boolean_arguments_must_be_booleans(self):
+		with mock.patch.object(tools.shutil, "which", return_value="/usr/bin/rg"):
+			t = tools.Tools(mock.Mock())
+		result = t.call("grep_search", json.dumps({"pattern": "x", "ignore_case": "false"}))
+		self.assertIn("ignore_case must be true or false", result.text)
 
 	def test_null_optional_arguments_take_defaults(self):
 		sandbox = mock.Mock()
@@ -270,6 +284,8 @@ class GlobFallbackTest(unittest.TestCase):
 			self.assertEqual(names("**/*.{py,txt}"), [".hidden/e.py", "a.py", "tests/b.py", "tests/deep/c.py", "tests/f.txt"])
 			self.assertEqual(names("{tests/deep,.hidden}/*.py"), [".hidden/e.py", "tests/deep/c.py"])
 			self.assertRegex(helpers.glob_files("[z-a]", root), "^Error: bad glob pattern")
+			with self.assertRaises(FileNotFoundError):
+				helpers.glob_files("*.py", os.path.join(root, "missing"))
 			(Path(root) / "tests" / "loop").symlink_to("..")
 			self.assertEqual(names("**/b.py"), ["tests/b.py"])
 
