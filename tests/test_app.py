@@ -215,6 +215,15 @@ class ToolsTest(unittest.TestCase):
 				self.assertTrue(result.error)
 				self.assertIn("path must be a string", result.text)
 
+	def test_nul_in_arguments_is_an_error(self):
+		t = tools.Tools(mock.Mock())
+		for name, args in (("read_file", {"path": "a\0b"}), ("run_shell_command", {"command": "echo a\0b"})):
+			with self.subTest(name=name):
+				result = t.call(name, json.dumps(args))
+				self.assertTrue(result.error)
+				self.assertIn("contains a NUL character", result.text)
+		t.sandbox.run.assert_not_called()
+
 	def test_boolean_arguments_must_be_booleans(self):
 		with mock.patch.object(tools.shutil, "which", return_value="/usr/bin/rg"):
 			t = tools.Tools(mock.Mock())

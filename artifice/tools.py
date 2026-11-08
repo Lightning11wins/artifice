@@ -120,6 +120,8 @@ class Tools:
 			kind = properties.get(key, {}).get("type")
 			if kind == "string" and not isinstance(value, str):
 				return ToolResult(f"Error: bad arguments for {name}: {key} must be a string, not {value!r}", True)
+			if isinstance(value, str) and "\0" in value:
+				return ToolResult(f"Error: bad arguments for {name}: {key} contains a NUL character: {value!r}", True)
 			if kind == "boolean" and not isinstance(value, bool):
 				return ToolResult(f"Error: bad arguments for {name}: {key} must be true or false, not {value!r}", True)
 		try:
