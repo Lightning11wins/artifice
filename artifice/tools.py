@@ -20,7 +20,8 @@ RG_IN_DIR = (
 	# rg searches a file named on its command line even when the glob filter excludes it.
 	'if [ ! -d "$dir" ]; then '
 	'if [ -n "$filter" ] && [ -f "$dir" ]; then '
-	'(cd -- "$(dirname -- "$dir")" && "$1" --files --hidden --no-ignore --max-depth 1 -g "$filter" -- .) '
+	'"$1" --files --max-depth 0 -g "$filter" -- . >/dev/null; [ $? -eq 2 ] && exit 2; '  # reports a bad glob
+	'(cd -- "$(dirname -- "$dir")" && "$1" --files -L --hidden --no-ignore --max-depth 1 -g "$filter" -- . 2>/dev/null) '
 	'| grep -qxF -- "./$(basename -- "$dir")" || exit 1; '
 	'fi; exec "$@" -- "$dir"; fi; '
 	'cd -- "$dir" || exit 2; set -o pipefail; '

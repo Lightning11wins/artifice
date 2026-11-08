@@ -320,9 +320,12 @@ class App:
 
 
 def main() -> None:
-	for stream, errors in ((sys.stdout, "backslashreplace"), (sys.stderr, "backslashreplace"), (sys.stdin, "replace")):
-		if stream is not None:  # None when the descriptor is closed
-			stream.reconfigure(errors=errors)
+	for name, mode, errors in (("stdin", "r", "replace"), ("stdout", "w", "backslashreplace"),
+			("stderr", "w", "backslashreplace")):
+		if getattr(sys, name) is None:  # its descriptor is closed, so /dev/null takes that number
+			setattr(sys, name, open(os.devnull, mode, errors=errors))
+		else:
+			getattr(sys, name).reconfigure(errors=errors)
 	exit_on_sigterm()
 	try:
 		_main()

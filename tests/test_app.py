@@ -443,6 +443,13 @@ class GlobFallbackTest(unittest.TestCase):
 		with tempfile.TemporaryDirectory() as d:
 			Path(d, "x.txt").write_text("needle\n")
 			path = os.path.join(d, "x.txt")
+			link = os.path.join(d, "link.py")
+			os.symlink("x.txt", link)
+			os.symlink("missing", os.path.join(d, "broken.py"))
+			self.assertEqual(t.call("grep_search", json.dumps({"pattern": "needle", "path": link, "include": "*.py"})).text,
+				f"{link}:1:needle")
+			bad = t.call("grep_search", json.dumps({"pattern": "needle", "path": path, "include": "{a"}))
+			self.assertTrue(bad.error, bad.text)
 			self.assertEqual(t.call("glob", json.dumps({"pattern": "*.rs", "path": path})).text, "No files matched.")
 			self.assertIn(path, t.call("glob", json.dumps({"pattern": "*.txt", "path": path})).text)
 			grep = {"pattern": "needle", "path": path}
@@ -480,8 +487,14 @@ class MainTest(unittest.TestCase):
 		with mock.patch.object(sys, "stdin", stdin), mock.patch.object(cli, "_main", lambda: print(input(), file=io.StringIO())):
 			cli.main()
 
-	def test_closed_stdin_does_not_crash(self):
-		with mock.patch.object(sys, "stdin", None), mock.patch.object(cli, "_main", lambda: None):
+	def test_closed_standard_streams_do_not_crash(self):
+		def use_streams():
+			self.assertIsNone(cli.read_input())
+			self.assertIsNone(deps._ask("Install?"))
+			print("x")
+
+		with mock.patch.object(sys, "stdin", None), mock.patch.object(sys, "stdout", None), \
+				mock.patch.object(cli, "_main", use_streams):
 			cli.main()
 
 
