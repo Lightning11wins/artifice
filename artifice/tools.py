@@ -16,8 +16,13 @@ SCRATCH_WARN_BYTES = 2 << 30
 # Paths in its output and errors get $2 as a prefix, so they read as if rg had searched $1. A file in $1 is
 # searched directly.
 RG_IN_DIR = (
-	'dir=$1 prefix=$2; shift 2; '
-	'if [ ! -d "$dir" ]; then exec "$@" -- "$dir"; fi; '
+	'dir=$1 prefix=$2 filter=$3; shift 3; '
+	# rg searches a file named on its command line even when the glob filter excludes it.
+	'if [ ! -d "$dir" ]; then '
+	'if [ -n "$filter" ] && [ -f "$dir" ]; then '
+	'(cd -- "$(dirname -- "$dir")" && "$1" --files --hidden --no-ignore --max-depth 1 -g "$filter" -- .) '
+	'| grep -qxF -- "./$(basename -- "$dir")" || exit 1; '
+	'fi; exec "$@" -- "$dir"; fi; '
 	'cd -- "$dir" || exit 2; set -o pipefail; '
 	'"$@" -- . 2>&1 | prefix="$prefix" awk \''
 	'sub(/^\\.\\//, "") { print ENVIRON["prefix"] $0; next } '
@@ -153,7 +158,7 @@ class Tools:
 				argv.append("--no-ignore")
 		else:
 			return self._helper("glob_files", {"pattern": pattern, "path": path})
-		r = self.sandbox.run(_rg_in(path, argv), timeout=60)
+		r = self.sandbox.run(_rg_in(path, argv, strip_dot_slash(pattern)), timeout=60)
 		if r.exit_code == 1 and not r.output.strip():
 			return ToolResult("No files matched.")
 		return ToolResult(_format(r, show_exit=r.exit_code not in (0, 1)), r.exit_code not in (0, 1))
@@ -179,7 +184,7 @@ class Tools:
 		if context:
 			argv += ["-C", str(int(context))]
 		argv += ["-e", pattern]
-		r = self.sandbox.run(_rg_in(path, argv) if self.rg else argv + ["--", path], timeout=120)
+		r = self.sandbox.run(_rg_in(path, argv, include) if self.rg else argv + ["--", path], timeout=120)
 		if r.exit_code == 1 and not r.output.strip():
 			return ToolResult("No matches.")
 		return ToolResult(_format(r, show_exit=r.exit_code not in (0, 1)), r.exit_code not in (0, 1))
@@ -192,9 +197,10 @@ class Tools:
 		return ToolResult(text, r.exit_code != 0)
 
 
-def _rg_in(path: str, argv: list[str]) -> list[str]:
+def _rg_in(path: str, argv: list[str], name_glob: str) -> list[str]:
+	"""Runs rg in path and prefixes results with it; a file path is searched only if its name matches name_glob."""
 	prefix = path.rstrip("/") + "/" if path.rstrip("/") else "/"
-	return ["bash", "-c", RG_IN_DIR, "bash", path, prefix, *argv]
+	return ["bash", "-c", RG_IN_DIR, "bash", path, prefix, name_glob, *argv]
 
 
 def _format(r: Result, show_exit: bool) -> str:

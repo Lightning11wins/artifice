@@ -320,9 +320,9 @@ class App:
 
 
 def main() -> None:
-	for stream in (sys.stdout, sys.stderr):
-		stream.reconfigure(errors="backslashreplace")
-	sys.stdin.reconfigure(errors="replace")
+	for stream, errors in ((sys.stdout, "backslashreplace"), (sys.stderr, "backslashreplace"), (sys.stdin, "replace")):
+		if stream is not None:  # None when the descriptor is closed
+			stream.reconfigure(errors=errors)
 	exit_on_sigterm()
 	try:
 		_main()

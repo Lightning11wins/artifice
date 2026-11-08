@@ -6,6 +6,7 @@ import argparse
 import io
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -429,6 +430,26 @@ class GlobFallbackTest(unittest.TestCase):
 			out = t.call("grep_search", json.dumps({"pattern": "needle", "path": f.name}))
 		self.assertIn(f"{f.name}:2:needle", out.text)
 
+	def test_rg_applies_the_glob_to_a_file_path(self):
+		if not shutil.which("rg"):
+			self.skipTest("rg is not installed")
+		t = tools.Tools(mock.Mock())
+
+		def run(argv, **kw):
+			p = subprocess.run(argv, capture_output=True, text=True)
+			return Result(output=p.stdout + p.stderr, exit_code=p.returncode)
+
+		t.sandbox.run.side_effect = run
+		with tempfile.TemporaryDirectory() as d:
+			Path(d, "x.txt").write_text("needle\n")
+			path = os.path.join(d, "x.txt")
+			self.assertEqual(t.call("glob", json.dumps({"pattern": "*.rs", "path": path})).text, "No files matched.")
+			self.assertIn(path, t.call("glob", json.dumps({"pattern": "*.txt", "path": path})).text)
+			grep = {"pattern": "needle", "path": path}
+			self.assertEqual(t.call("grep_search", json.dumps({**grep, "include": "*.py"})).text, "No matches.")
+			self.assertIn(f"{path}:1:needle", t.call("grep_search", json.dumps({**grep, "include": "*.txt"})).text)
+			self.assertIn(f"{path}:1:needle", t.call("grep_search", json.dumps(grep)).text)
+
 	def test_schemas_without_rg_do_not_offer_gitignore(self):
 		from artifice.tools import schemas
 		text = str(schemas(False))
@@ -457,6 +478,10 @@ class MainTest(unittest.TestCase):
 	def test_undecodable_input_does_not_crash(self):
 		stdin = io.TextIOWrapper(io.BytesIO(b"hi\xff\n"), encoding="utf-8")
 		with mock.patch.object(sys, "stdin", stdin), mock.patch.object(cli, "_main", lambda: print(input(), file=io.StringIO())):
+			cli.main()
+
+	def test_closed_stdin_does_not_crash(self):
+		with mock.patch.object(sys, "stdin", None), mock.patch.object(cli, "_main", lambda: None):
 			cli.main()
 
 
