@@ -363,7 +363,7 @@ import sys
 sys.path.insert(0, {str(root)!r})
 from pathlib import Path
 from artifice.sandbox import READ_ONLY, Sandbox
-# Stopping its parent must not keep the command alive.
+# A deadline kept inside the sandbox could be stopped like this.
 Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(
 	["bash", "-c", "kill -STOP $PPID 2>/dev/null; exec sleep 4283"], timeout=2)
 """
@@ -444,6 +444,32 @@ Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(
 				sb.ensure_sudo()
 		self.assertTrue(probe.exists())
 		self.assertFalse(sb._passwordless)
+
+	def test_preallocate_ioctls_are_refused(self):
+		# These ioctls call fallocate with KEEP_SIZE, which skips RLIMIT_FSIZE.
+		code = (
+			"import fcntl, os, struct\n"
+			"for request in (0x40305828, 0x4030582A, 0x40305839):\n"
+			"	fd = os.open('/tmp/resv', os.O_RDWR | os.O_CREAT)\n"
+			"	try:\n"
+			"		fcntl.ioctl(fd, request, struct.pack('hhqqiI4i', 0, 0, 0, 50 << 20, 0, 0, 0, 0, 0, 0))\n"
+			"	except OSError as e:\n"
+			"		print(e.strerror)\n"
+			"	print(os.stat('/tmp/resv').st_blocks)\n"
+			"	os.close(fd)\n"
+			"	os.unlink('/tmp/resv')\n"
+		)
+		sb = Sandbox(Profile(name="small", file_size_max=1 << 20), self.scratch, str(self.host))
+		r = sb.run(["python3", "-c", code])
+		self.assertEqual(r.output.split("\n"), ["Operation not supported", "0"] * 3 + [""], r.output)
+
+	def test_deleted_open_files_count_toward_scratch(self):
+		sb = Sandbox(Profile(name="small", scratch_max=16 << 20, file_size_max=8 << 20), self.scratch, str(self.host))
+		r = sb.run(["bash", "-c", "for i in 3 4 5 6 7 8; do eval \"exec $i>/tmp/held$i\"; rm /tmp/held$i; "
+			"head -c 7M /dev/zero >&$i; done; sleep 20"], timeout=15)
+		self.assertFalse(r.timed_out, r.output)
+		self.assertIsNone(r.exit_code, r.output)
+		self.assertTrue(r.scratch_full, r.output)
 
 	def test_sandbox_failure_after_sudo_is_not_a_password_error(self):
 		sb = Sandbox(READ_ONLY, self.scratch, str(self.host))

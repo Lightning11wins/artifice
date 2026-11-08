@@ -194,6 +194,9 @@ class Sandbox:
 	def run(self, argv: list[str], timeout: int | None = None) -> Result:
 		timeout = max(1, min(timeout or self.profile.timeout, self.profile.max_timeout))
 		self.ensure_sudo()
+		# Deleted files that the command keeps open use disk without showing in scratch, so free space is checked too.
+		allowance = self.profile.scratch_max - self.scratch_usage()[0]
+		free_at_start = self._disk_free()
 		# No new session: sudo finds its cached login through this terminal.
 		proc = subprocess.Popen(
 			self.command(deadline=timeout + DEADLINE_GRACE),
@@ -221,7 +224,7 @@ class Sandbox:
 					timed_out = True
 					break
 				if now >= next_scratch_check:
-					if self.scratch_full():
+					if self.scratch_full() or free_at_start - self._disk_free() > allowance:
 						killed_for_scratch = True
 						break
 					next_scratch_check = time.monotonic() + 1
@@ -269,6 +272,10 @@ class Sandbox:
 				hint = (" If AppArmor confines bwrap or unshare (check `sudo aa-status | grep -E 'bwrap|unshare'`), "
 					"that profile may block it.")
 			raise SandboxError(f"Failed to start sandbox (exit {result.exit_code}): {result.output.strip()}{hint}")
+
+	def _disk_free(self) -> int:
+		st = os.statvfs(self.scratch)
+		return st.f_bavail * st.f_frsize
 
 	def scratch_full(self) -> bool:
 		"""Whether scratch is past the profile's limits, counting a directory that cannot be read as past them."""
