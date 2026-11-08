@@ -227,6 +227,21 @@ class AgentTest(TempDataTest):
 		self.assertEqual([(m["role"], m.get("tool_call_id")) for m in agent.messages[2:5]],
 			[("assistant", None), ("tool", "c1"), ("user", None)])
 
+	def test_one_shot_narration_before_a_tool_call_stays_off_stdout(self):
+		class NarratingClient(FakeClient):
+			def stream(self, body):
+				if self.calls:
+					yield {"token": "Checking."}
+					yield {"reasoning": "r"}
+				yield from super().stream(body)
+
+		out, trace = io.StringIO(), io.StringIO()
+		ui = cli.TerminalUI(answer_out=out, trace_out=trace)
+		Agent(NarratingClient(calls=1), self.chat(), FakeTools(output="ok"), Settings(model="m"), ui,
+			context_length=32768).send("go")
+		self.assertEqual(out.getvalue(), "done\n")
+		self.assertIn("Checking.\n", trace.getvalue())
+
 	def test_tool_output_larger_than_the_context_is_elided(self):
 		agent = Agent(FakeClient(calls=1), self.chat(), FakeTools(), Settings(model="m"), QuietUI(), context_length=8192)
 		agent.send("go")
