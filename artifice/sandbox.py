@@ -22,6 +22,7 @@ from pathlib import Path
 
 CONFINE = str(Path(__file__).with_name("confine.py"))
 SCRATCH_MAX_AGE = 48 * 3600
+DEADLINE_GRACE = 10  # seconds past its timeout that a command survives Artifice being killed
 SUDO_NOTICE = ("Artifice starts the model's sandbox with sudo so the model can read every file on this computer. "
 	"The sandbox drops to your user with only read access before running anything.")
 
@@ -78,16 +79,17 @@ class Sandbox:
 		for _ in range(3):
 			self.scratch.mkdir(mode=0o700, parents=True, exist_ok=True)
 			fd = os.open(self.scratch, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-			while exclusive:
-				cleaning = _cleaning(self.scratch.parent)
+			if exclusive:
+				# clean_scratch locks the parent while it runs, and briefly locks each chat it cleans.
+				parent = os.open(self.scratch.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
 				try:
+					fcntl.flock(parent, fcntl.LOCK_SH)
 					fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-					break
 				except BlockingIOError:
-					if not cleaning:
-						os.close(fd)
-						raise SandboxError(f"Failed to open chat {self.scratch.name}: another Artifice session has it open.")
-					time.sleep(0.1)  # clean_scratch holds it briefly
+					os.close(fd)
+					raise SandboxError(f"Failed to open chat {self.scratch.name}: another Artifice session has it open.")
+				finally:
+					os.close(parent)
 			else:
 				fcntl.flock(fd, fcntl.LOCK_SH)
 			try:
@@ -98,7 +100,7 @@ class Sandbox:
 			os.close(fd)  # clean_scratch removed it before the lock was taken
 		raise SandboxError(f"Failed to lock scratch directory {self.scratch}")
 
-	def command(self) -> list[str]:
+	def command(self, deadline: int = 0) -> list[str]:
 		"""The sandbox command line. The command to run goes on stdin, which keeps it out of sudo's logs."""
 		home = os.path.expanduser("~")
 		env = {
@@ -155,6 +157,8 @@ class Sandbox:
 		]
 		cmd += [sys.executable, "-I", "-S", CONFINE, "--write", "/tmp", "--write", "/dev"]
 		cmd += ["--fsize", str(self.profile.file_size_max), "--argv-stdin"]
+		if deadline:
+			cmd += ["--deadline", str(deadline)]
 		return cmd
 
 	def ensure_sudo(self) -> None:
@@ -188,7 +192,7 @@ class Sandbox:
 		self.ensure_sudo()
 		# No new session: sudo finds its cached login through this terminal.
 		proc = subprocess.Popen(
-			self.command(),
+			self.command(deadline=timeout + DEADLINE_GRACE),
 			stdin=subprocess.PIPE,
 			stdout=subprocess.PIPE,
 			stderr=subprocess.STDOUT,
@@ -294,21 +298,6 @@ def hidden_in_sandbox(path: str) -> bool:
 		for p in (os.path.abspath(path), os.path.realpath(path)) for top in ("/tmp", "/dev"))
 
 
-def _cleaning(root: Path) -> bool:
-	"""Whether clean_scratch is running on root."""
-	try:
-		fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-	except OSError:
-		return False
-	try:
-		fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-		return False
-	except BlockingIOError:
-		return True
-	finally:
-		os.close(fd)
-
-
 def clean_scratch(root: Path, max_age: int = SCRATCH_MAX_AGE) -> None:
 	"""Deletes old files from the scratch directories of chats that are not open, then empty directories.
 
@@ -319,10 +308,10 @@ def clean_scratch(root: Path, max_age: int = SCRATCH_MAX_AGE) -> None:
 	except OSError:
 		return
 	try:
-		fcntl.flock(root_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # tells chats being opened to wait; see _cleaning
+		fcntl.flock(root_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # makes chats being opened wait; see _lock_scratch
 	except BlockingIOError:
 		os.close(root_fd)
-		return  # another Artifice is cleaning
+		return  # another Artifice is cleaning or opening a chat
 	# The walk holds a descriptor per directory level, and scratch trees can be deep.
 	soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
 	if hard == resource.RLIM_INFINITY or hard > soft:

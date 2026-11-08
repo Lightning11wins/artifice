@@ -356,6 +356,33 @@ Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(["sleep"
 				left = subprocess.run(["pgrep", "-f", "sleep 427[9]"], capture_output=True, text=True)
 				self.assertEqual(left.stdout, "")
 
+	def test_command_dies_when_artifice_is_killed(self):
+		root = Path(__file__).resolve().parent.parent
+		code = f"""
+import sys
+sys.path.insert(0, {str(root)!r})
+from pathlib import Path
+from artifice.sandbox import READ_ONLY, Sandbox
+Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(["sleep", "4283"], timeout=2)
+"""
+		parent = subprocess.Popen([sys.executable, "-I", "-c", code])
+		time.sleep(1.5)
+		parent.kill()
+		parent.wait()
+		deadline = time.monotonic() + 2 + artifice.sandbox.DEADLINE_GRACE + 10
+		while time.monotonic() < deadline:
+			left = subprocess.run(["pgrep", "-f", "sleep 428[3]"], capture_output=True, text=True).stdout
+			if not left:
+				break
+			time.sleep(0.5)
+		self.assertEqual(left, "")
+
+	def test_file_size_limit_and_default_signals(self):
+		sb = Sandbox(Profile(name="small", file_size_max=1 << 20), self.scratch, str(self.host))
+		r = sb.run(["bash", "-c", "head -c 2M /dev/zero > /tmp/big; echo $?; stat -c %s /tmp/big; rm /tmp/big; "
+			"yes | head -1 > /dev/null; echo ${PIPESTATUS[0]}"])
+		self.assertRegex(r.output, r"(?m)^153\n1048576\n141$")
+
 	def test_negative_timeout_is_clamped(self):
 		r = self.sh("sleep 0.2; echo done", timeout=-5)
 		self.assertFalse(r.timed_out)
@@ -478,15 +505,19 @@ Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(["sleep"
 		Sandbox(READ_ONLY, scratch, str(self.host), exclusive=True)
 
 	def test_opening_a_chat_waits_for_cleanup(self):
-		root = Path(tempfile.mkdtemp(dir=HOST_DIR, prefix="clean-"))
-		scratch = root / "chat"
-		scratch.mkdir()
-		root_fd = os.open(root, os.O_RDONLY)
-		chat_fd = os.open(scratch, os.O_RDONLY)
-		fcntl.flock(root_fd, fcntl.LOCK_EX)
-		fcntl.flock(chat_fd, fcntl.LOCK_EX)
-		threading.Timer(0.5, lambda: (os.close(chat_fd), os.close(root_fd))).start()
-		Sandbox(READ_ONLY, scratch, str(self.host), exclusive=True)
+		# clean_scratch holds the root's lock throughout, and a chat's lock while it cleans that chat.
+		for lock_chat in (True, False):
+			with self.subTest(lock_chat=lock_chat):
+				root = Path(tempfile.mkdtemp(dir=HOST_DIR, prefix="clean-"))
+				scratch = root / "chat"
+				scratch.mkdir()
+				fds = [os.open(root, os.O_RDONLY)] + ([os.open(scratch, os.O_RDONLY)] if lock_chat else [])
+				for fd in fds:
+					fcntl.flock(fd, fcntl.LOCK_EX)
+				threading.Timer(0.5, lambda: [os.close(fd) for fd in fds]).start()
+				start = time.monotonic()
+				Sandbox(READ_ONLY, scratch, str(self.host), exclusive=True)
+				self.assertGreater(time.monotonic() - start, 0.4)
 
 	def test_clean_scratch_enters_read_only_directories(self):
 		root = Path(tempfile.mkdtemp(dir=HOST_DIR, prefix="clean-"))

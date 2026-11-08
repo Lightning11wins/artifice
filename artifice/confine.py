@@ -13,6 +13,7 @@ import json
 import os
 import platform
 import resource
+import signal
 import struct
 import sys
 
@@ -153,6 +154,7 @@ def main() -> None:
 	write_dirs: list[str] = []
 	fsize = resource.RLIM_INFINITY
 	argv_stdin = False
+	deadline = 0
 	while args and args[0] != "--":
 		if args[0] == "--argv-stdin":
 			argv_stdin, args = True, args[1:]
@@ -162,6 +164,8 @@ def main() -> None:
 			write_dirs.append(value)
 		elif flag == "--fsize":
 			fsize = int(value)
+		elif flag == "--deadline":
+			deadline = int(value)
 		else:
 			fail(f"Failed to parse arguments: unknown flag {flag}")
 	if argv_stdin:
@@ -179,11 +183,37 @@ def main() -> None:
 		fail(f"Failed to set no_new_privs (errno {ctypes.get_errno()})")
 	landlock(write_dirs)
 	seccomp()
+	# Python ignores these at startup, and an exec would pass that on: `yes | head -1` would never get SIGPIPE.
+	for signum in (signal.SIGPIPE, signal.SIGXFSZ):
+		signal.signal(signum, signal.SIG_DFL)
+	if deadline:
+		supervise(deadline)
 	try:
 		os.execvp(command[0], command)
 	except OSError as e:
 		print(f"Failed to run {command[0]}: {e.strerror}", file=sys.stderr)
 		sys.exit(127)
+
+
+def supervise(deadline: int) -> None:
+	"""Returns in a child process, which runs the command. The parent exits after deadline seconds at most.
+
+	Artifice kills commands at their timeout, so this only matters when Artifice itself was killed. The parent is
+	bwrap's first process, so its exit ends the PID namespace and everything in it.
+	"""
+	pid = os.fork()
+	if pid == 0:
+		return
+
+	def expire(signum, frame):
+		os.kill(pid, signal.SIGKILL)
+		os._exit(128 + signal.SIGKILL)
+
+	signal.signal(signal.SIGALRM, expire)
+	signal.alarm(deadline)
+	_, status = os.waitpid(pid, 0)
+	code = os.waitstatus_to_exitcode(status)
+	sys.exit(code if code >= 0 else 128 - code)
 
 
 if __name__ == "__main__":
