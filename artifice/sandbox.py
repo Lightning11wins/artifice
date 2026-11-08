@@ -3,6 +3,7 @@
 bwrap runs as root through sudo, so it can grant CAP_DAC_READ_SEARCH in the host user namespace.
 setpriv then drops to the user's uid keeping only that capability, and confine.py adds Landlock and seccomp.
 """
+import errno
 import fcntl
 import json
 import os
@@ -46,7 +47,7 @@ class Result:
 	exit_code: int | None  # None when killed by timeout
 	timed_out: bool = False
 	truncated_bytes: int = 0
-	scratch_full: bool = False  # killed for growing scratch past the profile's limits
+	scratch_full: bool = False  # scratch is past the profile's limits; exit_code is None if that killed the command
 
 
 class SandboxError(Exception):
@@ -172,7 +173,7 @@ class Sandbox:
 		kept = bytearray()
 		dropped = 0
 		timed_out = False
-		scratch_full = False
+		killed_for_scratch = False
 		deadline = time.monotonic() + timeout
 		next_scratch_check = time.monotonic() + 1
 		sel = selectors.DefaultSelector()
@@ -189,9 +190,8 @@ class Sandbox:
 					timed_out = True
 					break
 				if now >= next_scratch_check:
-					size, files = self.scratch_usage()
-					if size > self.profile.scratch_max or files > self.profile.scratch_files_max:
-						scratch_full = True
+					if self.scratch_full():
+						killed_for_scratch = True
 						break
 					next_scratch_check = time.monotonic() + 1
 				if not sel.select(min(deadline, next_scratch_check) - now):
@@ -214,10 +214,10 @@ class Sandbox:
 			proc.stdout.close()
 		return Result(
 			output=kept.decode("utf-8", errors="replace"),
-			exit_code=None if timed_out or scratch_full else proc.returncode,
+			exit_code=None if timed_out or killed_for_scratch else proc.returncode,
 			timed_out=timed_out,
 			truncated_bytes=dropped,
-			scratch_full=scratch_full,
+			scratch_full=killed_for_scratch or self.scratch_full(),
 		)
 
 	def check(self) -> None:
@@ -234,17 +234,28 @@ class Sandbox:
 		if result.exit_code != 0:
 			raise SandboxError(f"Failed to start sandbox (exit {result.exit_code}): {result.output.strip()}")
 
-	def scratch_usage(self) -> tuple[int, int]:
-		"""Disk bytes and entries in scratch."""
+	def scratch_full(self) -> bool:
+		"""Whether scratch is past the profile's limits, counting a directory that cannot be read as past them."""
+		size, entries, unreadable = self.scratch_usage()
+		return unreadable or size > self.profile.scratch_max or entries > self.profile.scratch_files_max
+
+	def scratch_usage(self) -> tuple[int, int, bool]:
+		"""Disk bytes and entries in scratch, and whether some directory could not be read."""
 		size = entries = 0
-		for root, dirs, files in os.walk(self.scratch):
+		unreadable = False
+
+		def error(e: OSError) -> None:
+			nonlocal unreadable
+			unreadable = unreadable or e.errno in (errno.EACCES, errno.EPERM)
+
+		for root, dirs, files in os.walk(self.scratch, onerror=error):
 			for name in files + dirs:
 				entries += 1
 				try:
 					size += os.lstat(os.path.join(root, name)).st_blocks * 512
 				except OSError:
 					pass
-		return size, entries
+		return size, entries, unreadable
 
 
 def _quiet(argv: list[str]) -> bool:

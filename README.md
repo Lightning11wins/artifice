@@ -24,7 +24,7 @@ Artifice asks for your sudo password once per session (when sudo's ticket expire
 |---|---|
 | `read_file` | numbered lines with offset and limit; refuses binary and special files |
 | `list_directory` | entries with sizes |
-| `glob` | `rg --files -g` (falls back to `find`) |
+| `glob` | `rg --files -g` (falls back to Python's `glob`) |
 | `grep_search` | `rg` (falls back to `grep -rE`) |
 | `run_shell_command` | `bash -c` |
 
@@ -49,6 +49,7 @@ Every tool call runs as `sudo`, then `systemd-run --scope` (memory and task limi
   - seccomp allows only IPv4, IPv6 and netlink sockets, which the network namespace confines. That blocks unix sockets, which would otherwise reach dbus, ssh-agent and gpg-agent through socket files, and families like vsock and Bluetooth that ignore network namespaces. It blocks `open_by_handle_at`, which with the capability opens files by handle, past the sandbox's mounts. It also blocks io_uring and the keyring syscalls.
   - `no_new_privs` stops sudo and setuid binaries.
 - Limits: 120 s default timeout (600 s max), 8 GiB of memory without swap and 512 tasks, 1 GiB per written file, 4 GiB and 100,000 entries in scratch, 1 MiB of output kept per command.
+- Scratch limits are checked every second while a command runs and when it exits, and a directory Artifice cannot read counts as full. A command that finishes within a second can overshoot them; while scratch is over, later commands are killed after a second until the model deletes files. A hard cap would need a disk quota or a dedicated filesystem.
 
 The escape tests in `tests/test_sandbox.py` try each of these and must all fail to change anything. `tests/test_app.py` covers the agent loop and CLI with a fake server. The escape tests need sudo without a password prompt, so run `sudo -v` first, and run them outside any other sandbox:
 

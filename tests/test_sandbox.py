@@ -132,6 +132,9 @@ open("/tmp/linked", "w").write("pwned")
 		r = self.sh("echo hi > /tmp/a && mkdir -p /tmp/d && cat /tmp/a")
 		self.assertEqual(r.exit_code, 0, r.output)
 		self.assertEqual((self.scratch / "a").read_text(), "hi\n")
+		with tempfile.NamedTemporaryFile(dir="/tmp", prefix="artifice-host-") as host_file:
+			r = self.sh(f"ls {host_file.name}")
+		self.assertNotEqual(r.exit_code, 0, r.output)
 
 	def test_links_out_of_scratch_fail(self):
 		r = self.sh(f"ln {self.host}/file /tmp/hard")
@@ -301,11 +304,40 @@ except OSError as e:
 		sb = Sandbox(Profile(name="small", scratch_max=20 << 20, scratch_files_max=500), self.scratch, str(self.host))
 		r = sb.run(["bash", "-c", "for i in $(seq 30); do head -c 1M /dev/urandom > /tmp/big$i; sleep 0.1; done; echo done"])
 		self.assertTrue(r.scratch_full, r.output)
+		self.assertIsNone(r.exit_code)
 		self.assertNotIn("done", r.output)
 		r = sb.run(["bash", "-c", "mkdir -p /tmp/many && cd /tmp/many && for i in $(seq 2000); do : > $i; sleep 0.001; done; echo done"])
 		self.assertTrue(r.scratch_full, r.output)
 		self.assertNotIn("done", r.output)
-		self.sh("rm -rf /tmp/big* /tmp/many")
+		self.assertEqual(sb.run(["rm", "-rf", "/tmp/many"] + [f"/tmp/big{i}" for i in range(31)]).exit_code, 0)
+		self.assertFalse(sb.run(["true"]).scratch_full)
+		# A command shorter than the polling interval is caught when it exits.
+		r = sb.run(["fallocate", "-l", "30M", "/tmp/fast"])
+		self.assertTrue(r.scratch_full, r.output)
+		sb.run(["rm", "/tmp/fast"])
+		# A directory the host cannot read counts as full.
+		r = sb.run(["bash", "-c", "mkdir /tmp/hidden && chmod 0 /tmp/hidden"])
+		self.assertTrue(r.scratch_full, r.output)
+		self.assertFalse(sb.run(["bash", "-c", "chmod 700 /tmp/hidden && rmdir /tmp/hidden"]).scratch_full)
+
+	def test_sigterm_kills_the_running_command(self):
+		root = Path(__file__).resolve().parent.parent
+		code = f"""
+import sys
+sys.path.insert(0, {str(root)!r})
+from pathlib import Path
+from artifice.cli import exit_on_sigterm
+from artifice.sandbox import READ_ONLY, Sandbox
+exit_on_sigterm()
+Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(["sleep", "4279"], timeout=60)
+"""
+		parent = subprocess.Popen([sys.executable, "-I", "-c", code])
+		time.sleep(2)
+		parent.terminate()
+		self.assertEqual(parent.wait(10), 143)
+		time.sleep(0.5)
+		left = subprocess.run(["pgrep", "-f", "sleep 427[9]"], capture_output=True, text=True)
+		self.assertEqual(left.stdout, "")
 
 	def test_negative_timeout_is_clamped(self):
 		r = self.sh("sleep 0.2; echo done", timeout=-5)

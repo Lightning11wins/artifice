@@ -11,6 +11,8 @@ HELPERS = str(Path(__file__).with_name("helpers.py"))
 OUTPUT_MAX_CHARS = 30000
 OUTPUT_TAIL_CHARS = 8000
 SCRATCH_WARN_BYTES = 2 << 30
+SCRATCH_FULL = ("/tmp is past its size or file count limit, or holds a directory you made unreadable. "
+	"Delete files you no longer need, or chmod u+rwx the directory.")
 
 
 def _schema(name: str, description: str, properties: dict, required: list[str]) -> dict:
@@ -117,8 +119,7 @@ class Tools:
 				argv.append("--no-ignore")
 			argv += ["--", path]
 		else:
-			name = pattern.rsplit("/", 1)[-1]
-			argv = ["find", path, "-name", ".git", "-prune", "-o", "-type", "f", "-name", name, "-print"]
+			return self._helper("glob_files", {"pattern": pattern, "path": path})
 		r = self.sandbox.run(argv, timeout=60)
 		if r.exit_code == 1 and not r.output.strip():
 			return ToolResult("No files matched.")
@@ -152,7 +153,7 @@ class Tools:
 	def _run_shell_command(self, command: str, timeout: int | None = None) -> ToolResult:
 		r = self.sandbox.run(["bash", "-c", command], timeout=int(timeout) if timeout else None)
 		text = _format(r, show_exit=True)
-		if self.sandbox.scratch_usage()[0] > SCRATCH_WARN_BYTES:
+		if not r.scratch_full and self.sandbox.scratch_usage()[0] > SCRATCH_WARN_BYTES:
 			text += f"\n[Warning: /tmp holds over {SCRATCH_WARN_BYTES >> 30} GB. Delete files you no longer need.]"
 		return ToolResult(text, r.exit_code != 0)
 
@@ -163,10 +164,12 @@ def _format(r: Result, show_exit: bool) -> str:
 		text += f"\n[{r.truncated_bytes} more bytes of output were discarded.]"
 	if r.timed_out:
 		text += "\n[Killed: timed out.]"
-	elif r.scratch_full:
-		text += "\n[Killed: /tmp grew past its size or file count limit. Delete files you no longer need.]"
+	elif r.scratch_full and r.exit_code is None:
+		text += f"\n[Killed: {SCRATCH_FULL}]"
 	elif show_exit and r.exit_code != 0:
 		text += f"\n[Exit code {r.exit_code}]"
+	if r.scratch_full and r.exit_code is not None:
+		text += f"\n[{SCRATCH_FULL} Commands are killed after a second until you fix it.]"
 	return text or "(no output)"
 
 
