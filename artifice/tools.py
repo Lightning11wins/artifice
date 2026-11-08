@@ -91,7 +91,7 @@ class Tools:
 			return ToolResult(f"Error: unknown tool {name}", True)
 		try:
 			result = method(**args)
-		except (TypeError, ValueError) as e:
+		except (TypeError, ValueError, OverflowError) as e:
 			return ToolResult(f"Error: bad arguments for {name}: {e}", True)
 		except SandboxError as e:
 			return ToolResult(f"Error: {e}", True)
@@ -102,8 +102,8 @@ class Tools:
 		r = self.sandbox.run([sys.executable, "-I", "-S", HELPERS, tool, json.dumps(args)], timeout=60)
 		return ToolResult(_format(r, show_exit=False), r.exit_code != 0)
 
-	def _read_file(self, path: str, offset: int = 1, limit: int = 2000) -> ToolResult:
-		return self._helper("read_file", {"path": path, "offset": int(offset), "limit": int(limit)})
+	def _read_file(self, path: str, offset: int | None = None, limit: int | None = None) -> ToolResult:
+		return self._helper("read_file", {"path": path, "offset": int(offset or 1), "limit": int(limit or 2000)})
 
 	def _list_directory(self, path: str = ".") -> ToolResult:
 		return self._helper("list_directory", {"path": path or "."})
@@ -152,7 +152,7 @@ class Tools:
 	def _run_shell_command(self, command: str, timeout: int | None = None) -> ToolResult:
 		r = self.sandbox.run(["bash", "-c", command], timeout=int(timeout) if timeout else None)
 		text = _format(r, show_exit=True)
-		if self.sandbox.scratch_bytes() > SCRATCH_WARN_BYTES:
+		if self.sandbox.scratch_usage()[0] > SCRATCH_WARN_BYTES:
 			text += f"\n[Warning: /tmp holds over {SCRATCH_WARN_BYTES >> 30} GB. Delete files you no longer need.]"
 		return ToolResult(text, r.exit_code != 0)
 
@@ -163,6 +163,8 @@ def _format(r: Result, show_exit: bool) -> str:
 		text += f"\n[{r.truncated_bytes} more bytes of output were discarded.]"
 	if r.timed_out:
 		text += "\n[Killed: timed out.]"
+	elif r.scratch_full:
+		text += "\n[Killed: /tmp grew past its size or file count limit. Delete files you no longer need.]"
 	elif show_exit and r.exit_code != 0:
 		text += f"\n[Exit code {r.exit_code}]"
 	return text or "(no output)"

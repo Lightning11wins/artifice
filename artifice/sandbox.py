@@ -33,6 +33,8 @@ class Profile:
 	tasks_max: int = 512
 	file_size_max: int = 1 << 30  # largest file a command may write to scratch
 	output_max: int = 1 << 20  # bytes of output kept per command
+	scratch_max: int = 4 << 30  # bytes of disk scratch may use; a command past it is killed
+	scratch_files_max: int = 100_000
 
 
 READ_ONLY = Profile(name="read-only")
@@ -44,6 +46,7 @@ class Result:
 	exit_code: int | None  # None when killed by timeout
 	timed_out: bool = False
 	truncated_bytes: int = 0
+	scratch_full: bool = False  # killed for growing scratch past the profile's limits
 
 
 class SandboxError(Exception):
@@ -140,7 +143,7 @@ class Sandbox:
 			return
 		if _quiet(["sudo", "-n", "-v"]):
 			return
-		if _quiet(["sudo", "-n", self.bwrap, "--version"]):
+		if self._starts_without_password():
 			self._passwordless = True
 			return
 		if not sys.stdin.isatty():
@@ -148,6 +151,13 @@ class Sandbox:
 		self.notify(SUDO_NOTICE)
 		if subprocess.run(["sudo", "-v"]).returncode != 0:
 			raise SandboxError("Failed to authenticate with sudo.")
+
+	def _starts_without_password(self) -> bool:
+		"""Whether sudo runs the sandbox command itself without a password, as a narrow NOPASSWD rule allows."""
+		try:
+			return subprocess.run(self.command(), input=b'["true"]', capture_output=True, timeout=30).returncode == 0
+		except subprocess.TimeoutExpired:
+			return False
 
 	def run(self, argv: list[str], timeout: int | None = None) -> Result:
 		timeout = max(1, min(timeout or self.profile.timeout, self.profile.max_timeout))
@@ -162,7 +172,9 @@ class Sandbox:
 		kept = bytearray()
 		dropped = 0
 		timed_out = False
+		scratch_full = False
 		deadline = time.monotonic() + timeout
+		next_scratch_check = time.monotonic() + 1
 		sel = selectors.DefaultSelector()
 		try:
 			try:
@@ -172,11 +184,17 @@ class Sandbox:
 				pass
 			sel.register(proc.stdout, selectors.EVENT_READ)
 			while True:
-				remaining = deadline - time.monotonic()
-				if remaining <= 0:
+				now = time.monotonic()
+				if now >= deadline:
 					timed_out = True
 					break
-				if not sel.select(remaining):
+				if now >= next_scratch_check:
+					size, files = self.scratch_usage()
+					if size > self.profile.scratch_max or files > self.profile.scratch_files_max:
+						scratch_full = True
+						break
+					next_scratch_check = time.monotonic() + 1
+				if not sel.select(min(deadline, next_scratch_check) - now):
 					continue
 				chunk = os.read(proc.stdout.fileno(), 65536)
 				if not chunk:
@@ -196,9 +214,10 @@ class Sandbox:
 			proc.stdout.close()
 		return Result(
 			output=kept.decode("utf-8", errors="replace"),
-			exit_code=None if timed_out else proc.returncode,
+			exit_code=None if timed_out or scratch_full else proc.returncode,
 			timed_out=timed_out,
 			truncated_bytes=dropped,
+			scratch_full=scratch_full,
 		)
 
 	def check(self) -> None:
@@ -215,15 +234,17 @@ class Sandbox:
 		if result.exit_code != 0:
 			raise SandboxError(f"Failed to start sandbox (exit {result.exit_code}): {result.output.strip()}")
 
-	def scratch_bytes(self) -> int:
-		total = 0
-		for root, _dirs, files in os.walk(self.scratch):
-			for name in files:
+	def scratch_usage(self) -> tuple[int, int]:
+		"""Disk bytes and entries in scratch."""
+		size = entries = 0
+		for root, dirs, files in os.walk(self.scratch):
+			for name in files + dirs:
+				entries += 1
 				try:
-					total += os.lstat(os.path.join(root, name)).st_size
+					size += os.lstat(os.path.join(root, name)).st_blocks * 512
 				except OSError:
 					pass
-		return total
+		return size, entries
 
 
 def _quiet(argv: list[str]) -> bool:
@@ -264,6 +285,16 @@ def clean_scratch(root: Path, max_age: int = SCRATCH_MAX_AGE) -> None:
 
 
 def _clean_dir(top_fd: int, cutoff: float) -> None:
+	# Directories need owner write and search for their entries to be deleted.
+	os.fchmod(top_fd, os.fstat(top_fd).st_mode | 0o700)
+	for _path, dirnames, _files, dir_fd in os.fwalk(".", dir_fd=top_fd, follow_symlinks=False):
+		for name in dirnames:
+			try:
+				st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+				if stat.S_ISDIR(st.st_mode) and st.st_mode & 0o700 != 0o700:
+					os.chmod(name, st.st_mode | 0o700, dir_fd=dir_fd)
+			except OSError:
+				pass
 	for _path, dirnames, filenames, dir_fd in os.fwalk(".", dir_fd=top_fd, topdown=False, follow_symlinks=False):
 		for name in filenames + dirnames:
 			try:

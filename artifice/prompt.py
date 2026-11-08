@@ -25,7 +25,7 @@ def system_prompt(cwd: str, profile_name: str) -> str:
 
 # Permissions: {profile_name}
 You can read every file on this computer, including root-only ones, see every running process, and run commands. You cannot change anything:
-- Writes fail everywhere except /tmp, a private scratch directory for this chat. Files there persist between your commands in this chat and are deleted after 48 hours. Use it for intermediate results or helper scripts.
+- Writes fail everywhere except /tmp, a private scratch directory for this chat. Files there persist between your commands in this chat and are deleted after 48 hours. It holds at most 4 GB; a command that grows it past that is killed. Use it for intermediate results or helper scripts.
 - There is no network access, you cannot signal or trace other processes, and sudo does not work. Per-process details that need trace access, like /proc/PID/environ, fd and maps, are unreadable.
 - These limits are enforced by the operating system. Don't try to work around them.
 - If the user asks for a change, investigate first, then give them the exact edit or commands to run themselves.

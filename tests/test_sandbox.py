@@ -14,10 +14,12 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from artifice.sandbox import READ_ONLY, Profile, Sandbox, clean_scratch  # noqa: E402
+import artifice.sandbox  # noqa: E402
+from artifice.sandbox import READ_ONLY, Profile, Sandbox, SandboxError, clean_scratch  # noqa: E402
 
 # Host directory the sandbox can see but must not modify. Under $HOME, not /tmp, which the sandbox replaces.
 HOST_DIR = Path.home() / ".cache" / "artifice-tests"
@@ -45,6 +47,10 @@ class SandboxEscapeTest(unittest.TestCase):
 
 	def py(self, code: str, timeout: int = 20):
 		return self.sb.run([sys.executable, "-I", "-c", code], timeout=timeout)
+
+	def skipIfMissing(self, tool: str):
+		if tool not in ("echo", "touch", "rm", "mv", "mkdir", "ln", "chmod", "truncate") and not shutil.which(tool):
+			self.skipTest(f"{tool} is not installed")
 
 	def assertUnchanged(self):
 		self.assertEqual((self.host / "file").read_text(), "original\n")
@@ -117,6 +123,7 @@ open("/tmp/linked", "w").write("pwned")
 			f"setfattr -n user.x -v 1 {self.host}/file",
 		]:
 			with self.subTest(cmd=cmd):
+				self.skipIfMissing(cmd.split()[0])
 				r = self.sh(cmd)
 				self.assertNotEqual(r.exit_code, 0, r.output)
 		self.assertUnchanged()
@@ -234,6 +241,8 @@ print("ok")
 				f"timeout 5 gdb -p {pid} -batch -ex 'call (int)kill(0, 9)'",
 			]:
 				with self.subTest(cmd=cmd):
+					if "gdb" in cmd:
+						self.skipIfMissing("gdb")
 					self.assertNotEqual(self.sh(cmd).exit_code, 0)
 			time.sleep(0.2)
 			self.assertIsNone(victim.poll())
@@ -288,6 +297,37 @@ except OSError as e:
 		self.assertRegex(r.output, r"^blocked \d+ 11", r.output)  # EAGAIN
 		self.assertLess(int(r.output.split()[1]), 32)
 
+	def test_scratch_limits(self):
+		sb = Sandbox(Profile(name="small", scratch_max=20 << 20, scratch_files_max=500), self.scratch, str(self.host))
+		r = sb.run(["bash", "-c", "for i in $(seq 30); do head -c 1M /dev/urandom > /tmp/big$i; sleep 0.1; done; echo done"])
+		self.assertTrue(r.scratch_full, r.output)
+		self.assertNotIn("done", r.output)
+		r = sb.run(["bash", "-c", "mkdir -p /tmp/many && cd /tmp/many && for i in $(seq 2000); do : > $i; sleep 0.001; done; echo done"])
+		self.assertTrue(r.scratch_full, r.output)
+		self.assertNotIn("done", r.output)
+		self.sh("rm -rf /tmp/big* /tmp/many")
+
+	def test_negative_timeout_is_clamped(self):
+		r = self.sh("sleep 0.2; echo done", timeout=-5)
+		self.assertFalse(r.timed_out)
+		self.assertIn("done", r.output)
+
+	def test_python_under_host_tmp_is_refused(self):
+		with mock.patch.object(sys, "executable", "/tmp/venv/bin/python3"):
+			with self.assertRaisesRegex(SandboxError, "under /tmp"):
+				self.sb.check()
+
+	def test_sudo_probe_runs_the_sandbox_command(self):
+		# A NOPASSWD rule must cover the whole sandbox command, not just bwrap.
+		sb = Sandbox(READ_ONLY, self.scratch, str(self.host))
+		sb.setpriv = "/nonexistent/setpriv"
+		quiet = artifice.sandbox._quiet
+		with mock.patch.object(artifice.sandbox, "_quiet", lambda argv: False if argv[-1] == "-v" else quiet(argv)), \
+				mock.patch.object(sys.stdin, "isatty", lambda: False):
+			with self.assertRaisesRegex(SandboxError, "needs a password"):
+				sb.ensure_sudo()
+		self.assertFalse(sb._passwordless)
+
 	def test_cwd_under_host_tmp(self):
 		tmp = tempfile.mkdtemp(dir="/tmp", prefix="artifice-test-")
 		try:
@@ -332,6 +372,18 @@ except OSError as e:
 		self.assertTrue(outside.exists())
 		self.assertFalse(chat.exists())
 		outside.unlink()
+
+	def test_clean_scratch_enters_read_only_directories(self):
+		root = Path(tempfile.mkdtemp(dir=HOST_DIR, prefix="clean-"))
+		self.addCleanup(subprocess.run, ["chmod", "-R", "u+rwx", str(root)])
+		locked = root / "chat" / "ro" / "none"
+		locked.mkdir(parents=True)
+		(locked / "file").write_text("x")
+		locked.chmod(0)
+		locked.parent.chmod(0o555)
+		(root / "chat").chmod(0o555)
+		clean_scratch(root, max_age=-60)
+		self.assertFalse((root / "chat").exists())
 
 	def test_clean_scratch_skips_open_chats_and_counts_from_ctime(self):
 		root = Path(tempfile.mkdtemp(dir=HOST_DIR, prefix="clean-"))
