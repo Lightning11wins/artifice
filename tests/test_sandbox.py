@@ -264,6 +264,17 @@ print("ok")
 		r = self.sh("grep NoNewPrivs /proc/self/status")
 		self.assertIn("1", r.output)
 
+	def test_mounts_outside_tmp_and_dev_are_read_only(self):
+		r = self.sh("cat /proc/self/mountinfo")
+		mounts = [line.split() for line in r.output.splitlines()]
+		self.assertIn("/proc", [m[4] for m in mounts], r.output)
+		for m in mounts:
+			fstype = m[m.index("-") + 1]
+			if fstype == "autofs":
+				continue  # an automount trigger, which only the automount daemon can change
+			if not any(m[4] == top or m[4].startswith(top + "/") for top in ("/tmp", "/dev")):
+				self.assertIn("ro", m[5].split(","), " ".join(m))
+
 	def test_kernel_interfaces_read_only(self):
 		for cmd in ["echo 1 > /proc/sys/vm/drop_caches", "echo 1 > /sys/kernel/mm/ksm/run",
 				"echo x > /proc/sys/kernel/hostname"]:
@@ -272,16 +283,21 @@ print("ok")
 
 	def test_blocked_syscalls(self):
 		code = ("import ctypes, platform; libc = ctypes.CDLL(None, use_errno=True); "
-			"nr = {'x86_64': {'uring': 425, 'add_key': 248, 'request_key': 249, 'keyctl': 250, 'handle': 304}, "
-			"'aarch64': {'uring': 425, 'add_key': 217, 'request_key': 218, 'keyctl': 219, 'handle': 265}}"
+			"nr = {'x86_64': {'uring': 425, 'add_key': 248, 'request_key': 249, 'keyctl': 250, 'handle': 304, "
+			"'inotify': 294, 'fanotify': 300}, "
+			"'aarch64': {'uring': 425, 'add_key': 217, 'request_key': 218, 'keyctl': 219, 'handle': 265, "
+			"'inotify': 26, 'fanotify': 262}}"
 			"[platform.machine()]; "
 			"buf = ctypes.create_string_buffer(128); "
 			"calls = [(nr['uring'], 8, buf), (nr['add_key'], b'user', b'artifice', b'x', 1, -3), "
 			"(nr['request_key'], b'user', b'artifice', None, -3), (nr['keyctl'], 0, -4, 0), "
-			"(nr['handle'], -100, buf, 0)]; "
+			"(nr['handle'], -100, buf, 0), (nr['inotify'], 0), (nr['fanotify'], 0x200, 0)]; "
 			"print(*[(ctypes.set_errno(0), f'{libc.syscall(*c)}/{ctypes.get_errno()}')[1] for c in calls])")
 		r = self.py(code)
-		self.assertEqual(r.output.split(), ["-1/38"] * 5, r.output)  # ENOSYS from seccomp
+		self.assertEqual(r.output.split(), ["-1/38"] * 7, r.output)  # ENOSYS from seccomp
+		if os.uname().machine == "x86_64":
+			r = self.py("import ctypes; libc = ctypes.CDLL(None, use_errno=True); print(libc.syscall(253), ctypes.get_errno())")
+			self.assertEqual(r.output.split(), ["-1", "38"], r.output)
 
 	def test_other_syscall_abis_are_killed(self):
 		if os.uname().machine != "x86_64":
@@ -535,8 +551,12 @@ try:
 	print("leased")
 except OSError as e:
 	print(e.strerror)
+try:
+	fcntl.fcntl(fd, 1100)  # a command newer than the filter knows
+except OSError as e:
+	print(e.strerror)
 """)
-		self.assertEqual(r.output.strip(), "Permission denied", r.output)
+		self.assertEqual(r.output.split("\n"), ["Permission denied"] * 2 + [""], r.output)
 
 	def test_host_sysv_ipc_is_hidden(self):
 		libc = ctypes.CDLL(None, use_errno=True)
@@ -568,6 +588,37 @@ print(libc.msgget({key}, 0), ctypes.get_errno())
 			sb = Sandbox(READ_ONLY, scratch, str(self.host), exclusive=True)
 		sb.close()
 		self.assertEqual(len(calls), 1)
+
+	def test_scratch_usage_does_not_follow_a_swapped_symlink(self):
+		scratch = Path(tempfile.mkdtemp(dir=HOST_DIR, prefix="scratch-"))
+		outside = Path(tempfile.mkdtemp(dir=HOST_DIR, prefix="outside-"))
+		for i in range(100):
+			(outside / f"f{i}").write_text("x")
+		(scratch / "d").mkdir()
+		sb = Sandbox(READ_ONLY, scratch, str(self.host))
+		real_stat, real_lstat = os.stat, os.lstat
+		swapped = False
+
+		def flipping(real):
+			# A running command keeps the directory in place for each check and swaps in a symlink right after.
+			def check(name, *args, **kwargs):
+				nonlocal swapped
+				if os.path.basename(os.fspath(name)) != "d":
+					return real(name, *args, **kwargs)
+				if swapped:
+					os.unlink(scratch / "d")
+					os.rename(scratch / "moved", scratch / "d")
+				st = real(name, *args, **kwargs)
+				os.rename(scratch / "d", scratch / "moved")
+				os.symlink(outside, scratch / "d")
+				swapped = True
+				return st
+			return check
+
+		with mock.patch.object(os, "stat", flipping(real_stat)), mock.patch.object(os, "lstat", flipping(real_lstat)):
+			size, entries, unreadable = sb.scratch_usage()
+		self.assertLess(entries, 10)
+		self.assertFalse(unreadable)
 
 	def test_deleted_open_files_count_toward_scratch(self):
 		sb = Sandbox(Profile(name="small", scratch_max=16 << 20, file_size_max=8 << 20), self.scratch, str(self.host))

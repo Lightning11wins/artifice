@@ -292,18 +292,36 @@ class Sandbox:
 		"""Disk bytes and entries in scratch, and whether some entry could not be measured."""
 		size = entries = 0
 		unreadable = False
-
-		def error(e: OSError) -> None:
-			nonlocal unreadable
-			unreadable = unreadable or e.errno != errno.ENOENT
-
-		for root, dirs, files in os.walk(self.scratch, onerror=error):
-			for name in files + dirs:
+		flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+		# A running command can swap a directory for a symlink, so the walk opens each level without following one.
+		stack = []
+		try:
+			top = os.open(self.scratch, flags)
+			stack.append((top, iter(os.listdir(top))))
+			while stack:
+				dir_fd, names = stack[-1]
+				name = next(names, None)
+				if name is None:
+					os.close(stack.pop()[0])
+					continue
 				entries += 1
 				try:
-					size += os.lstat(os.path.join(root, name)).st_blocks * 512
+					st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+					size += st.st_blocks * 512
+					if stat.S_ISDIR(st.st_mode):
+						fd = os.open(name, flags, dir_fd=dir_fd)
+						try:
+							stack.append((fd, iter(os.listdir(fd))))
+						except OSError:
+							os.close(fd)
+							raise
 				except OSError as e:
-					error(e)
+					unreadable = unreadable or e.errno not in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR)
+		except OSError as e:
+			unreadable = unreadable or e.errno != errno.ENOENT
+		finally:
+			for fd, _names in stack:
+				os.close(fd)
 		return size, entries, unreadable
 
 

@@ -51,15 +51,16 @@ WRITE_RIGHTS_V1 = (FS_WRITE_FILE | FS_REMOVE_DIR | FS_REMOVE_FILE | FS_MAKE_CHAR
 # Seccomp: per-architecture audit value and syscall numbers.
 ARCHES = {
 	"x86_64": {"audit": 0xC000003E, "socket": 41, "open_by_handle_at": 304, "add_key": 248, "request_key": 249,
-		"keyctl": 250, "fallocate": 285, "ioctl": 16, "fcntl": 72},
+		"keyctl": 250, "fallocate": 285, "ioctl": 16, "fcntl": 72, "notify_init": (253, 294, 300)},
 	"aarch64": {"audit": 0xC00000B7, "socket": 198, "open_by_handle_at": 265, "add_key": 217, "request_key": 218,
-		"keyctl": 219, "fallocate": 47, "ioctl": 29, "fcntl": 25},
+		"keyctl": 219, "fallocate": 47, "ioctl": 29, "fcntl": 25, "notify_init": (26, 262)},
 }
 IO_URING_SYSCALLS = (425, 426, 427)  # setup, enter, register; io_uring can open sockets past seccomp
 X32_SYSCALL_BIT = 0x40000000
 ALLOWED_FAMILIES = (2, 10, 16)  # AF_INET, AF_INET6, AF_NETLINK; all confined by the network namespace
 FALLOC_FL_KEEP_SIZE = 0x01
 F_SETLEASE = 1024
+F_LAST_KNOWN = 1038  # F_SET_FILE_RW_HINT; later commands, such as delegations, may conflict with host writers too
 PREALLOCATE_IOCTLS = (0x40305828, 0x4030582A, 0x40305839)  # FS_IOC_RESVSP, FS_IOC_RESVSP64, FS_IOC_ZERO_RANGE
 
 BPF_LD_W_ABS = 0x20
@@ -127,7 +128,9 @@ def seccomp_program(arch: dict[str, int]) -> bytes:
 	if arch["audit"] == ARCHES["x86_64"]["audit"]:
 		prog += [jump(BPF_JGE_K, X32_SYSCALL_BIT, 0, 1), stmt(BPF_RET_K, SECCOMP_RET_KILL_PROCESS)]
 	# open_by_handle_at opens files outside the sandbox's mounts when CAP_DAC_READ_SEARCH is held.
-	denied = (*IO_URING_SYSCALLS, arch["open_by_handle_at"], arch["add_key"], arch["request_key"], arch["keyctl"])
+	# inotify and fanotify count against per-user limits that the user's host programs share.
+	denied = (*IO_URING_SYSCALLS, arch["open_by_handle_at"], arch["add_key"], arch["request_key"], arch["keyctl"],
+		*arch["notify_init"])
 	for nr in denied:
 		prog += [jump(BPF_JEQ_K, nr, 0, 1), stmt(BPF_RET_K, errno(ENOSYS))]
 	# The kernel skips RLIMIT_FSIZE for fallocate with KEEP_SIZE, which could fill the disk in one call.
@@ -148,9 +151,10 @@ def seccomp_program(arch: dict[str, int]) -> bytes:
 	prog.append(stmt(BPF_LD_W_ABS, 0))
 	# A lease on a host file the user owns would make host programs block in open().
 	prog += [
-		jump(BPF_JEQ_K, arch["fcntl"], 0, 4),
+		jump(BPF_JEQ_K, arch["fcntl"], 0, 5),
 		stmt(BPF_LD_W_ABS, 24),  # low word of seccomp_data.args[1], the command
-		jump(BPF_JEQ_K, F_SETLEASE, 0, 1),
+		jump(BPF_JEQ_K, F_SETLEASE, 1, 0),
+		jump(BPF_JGE_K, F_LAST_KNOWN + 1, 0, 1),
 		stmt(BPF_RET_K, errno(EACCES)),
 		stmt(BPF_LD_W_ABS, 0),
 	]
