@@ -184,6 +184,22 @@ class AgentTest(TempDataTest):
 		agent = Agent(FakeClient(), chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=32768)
 		self.assertLess(agent.estimate_tokens(), 100)
 
+	def test_reasoning_the_server_counted_is_dropped_at_the_next_message(self):
+		class ThinkingClient(FakeClient):
+			def stream(self, body):
+				if body["messages"][-1]["content"].startswith("Stop here."):
+					yield from super().stream(body)
+					return
+				yield {"usage": {"prompt_tokens": 10000, "completion_tokens": 15000}}
+				yield {"reasoning": "r" * 60000}
+				yield {"token": "done"}
+
+		client = ThinkingClient()
+		agent = Agent(client, self.chat(), FakeTools(), Settings(model="m"), QuietUI(), context_length=32768)
+		agent.send("hi")
+		agent.send("next")
+		self.assertEqual(client.summaries, 0)
+
 	def test_tool_calls_left_open_by_a_crash_are_answered_on_resume(self):
 		chat = self.chat(("user", "go"))
 		chat.messages.append({"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",

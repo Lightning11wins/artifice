@@ -65,6 +65,7 @@ class Agent:
 
 	def send(self, text: str) -> None:
 		self._close_open_tool_calls("Artifice stopped before this tool finished.")  # a chat saved mid-tool
+		self._forget_dropped_reasoning()
 		self.messages.append({"role": "user", "content": text})
 		self.chat.save()
 		try:
@@ -78,6 +79,17 @@ class Agent:
 			raise
 		finally:
 			self.chat.save()
+
+	def _forget_dropped_reasoning(self) -> None:
+		"""Takes reasoning the server counted out of usage_tokens, since chat templates drop it after a new user message.
+
+		The low guess at its tokens keeps the estimate high."""
+		if self.usage_tokens is None:
+			return
+		last_user = max((i for i, m in enumerate(self.messages) if m["role"] == "user"), default=0)
+		dropped = sum(len((m.get("reasoning_content") or "").encode())
+			for m in self.messages[last_user + 1:self.usage_n] if m["role"] == "assistant")
+		self.usage_tokens -= int(dropped / ELIDED_CHARS_PER_TOKEN)
 
 	def _loop(self) -> None:
 		overflowed_at: int | None = None  # history bytes at the last overflow
