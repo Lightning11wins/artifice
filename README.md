@@ -1,6 +1,6 @@
 # Artifice
 
-A terminal chat harness for local models served by [llm-server](../llm-server). The model can read any file and run commands, but the operating system stops it from writing anything outside its scratch directory.
+A terminal chat harness for local models served by [llm-server](https://github.com/Lightning11wins/llm-server). The model can read any file and run commands, but the operating system stops it from writing anything outside its scratch directory.
 
 ## Run
 
