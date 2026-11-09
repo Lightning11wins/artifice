@@ -106,9 +106,9 @@ def glob_files(pattern: str, path: str) -> str:
 	for root, dirs, files in os.walk(path):  # does not follow symlinked directories
 		dirs[:] = [d for d in dirs if d != ".git"]
 		for name in files:
-			if name == ".git":  # a submodule or worktree link
-				continue
 			full = os.path.join(root, name)
+			if name == ".git" or os.path.islink(full):  # rg skips submodule and worktree links, and symlinks
+				continue
 			if regex.match(os.path.relpath(full, path)):
 				matches.append(full)
 	return "\n".join(sorted(matches)) or "No files matched."

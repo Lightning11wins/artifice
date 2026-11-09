@@ -770,6 +770,7 @@ class GlobFallbackTest(unittest.TestCase):
 			self.assertEqual(names("**/b.py"), ["tests/b.py"])
 			self.assertEqual(names("tests/{,deep/}*.py"), ["tests/deep/c.py"])
 			(Path(root) / "tests" / ".git").write_text("gitdir: elsewhere\n")
+			(Path(root) / "tests" / "link.py").symlink_to("b.py")
 			self.assertEqual(names("tests/*"), ["tests/b.py", "tests/f.txt"])
 			(Path(root) / "new\nline").mkdir()
 			(Path(root) / "new\nline" / "g.py").write_text("")
