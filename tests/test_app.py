@@ -842,6 +842,16 @@ class CommandTest(TempDataTest):
 
 @unittest.skipUnless(shutil.which("rg"), "rg is not installed")
 class SearchTest(unittest.TestCase):
+	def test_unpaired_surrogates_are_rejected_before_the_sandbox(self):
+		t = tools.Tools(mock.Mock())
+		for name, args in (("grep_search", '{"pattern": "\\ud800"}'), ("glob", '{"pattern": "*", "path": "\\ud800"}'),
+				("run_shell_command", '{"command": "echo \\udc7f"}')):
+			with self.subTest(name=name):
+				result = t.call(name, args)
+				self.assertTrue(result.error)
+				self.assertIn("unpaired surrogate", result.text)
+		t.sandbox.run.assert_not_called()
+
 	def test_leading_dot_slash_is_stripped_for_rg(self):
 		with mock.patch.object(tools.shutil, "which", return_value="/usr/bin/rg"):
 			t = tools.Tools(mock.Mock())

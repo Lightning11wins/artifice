@@ -1,5 +1,6 @@
 """Tool schemas for the model and their implementations, all run through the sandbox."""
 import json
+import os
 import shutil
 import sys
 from dataclasses import dataclass
@@ -127,6 +128,11 @@ class Tools:
 				return ToolResult(f"Error: bad arguments for {name}: {key} must be a string, not {value!r}", True)
 			if isinstance(value, str) and "\0" in value:
 				return ToolResult(f"Error: bad arguments for {name}: {key} contains a NUL character: {value!r}", True)
+			try:
+				if isinstance(value, str):
+					os.fsencode(value)  # as exec will
+			except UnicodeEncodeError:
+				return ToolResult(f"Error: bad arguments for {name}: {key} contains an unpaired surrogate: {value!r}", True)
 			if kind == "boolean" and not isinstance(value, bool):
 				return ToolResult(f"Error: bad arguments for {name}: {key} must be true or false, not {value!r}", True)
 		try:
