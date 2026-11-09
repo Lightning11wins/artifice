@@ -196,6 +196,8 @@ class Tools:
 		if context:
 			argv += ["-C", str(int(context))]
 		argv += ["-e", pattern]
+		if not self.rg and Path(path).name == ".git" and not path.endswith("/"):
+			path += "/"  # grep's --exclude-dir=.git also skips a .git named on the command line
 		r = self.sandbox.run(_rg_in(path, argv, include) if self.rg else argv + ["--", path], timeout=120)
 		if r.exit_code == 1 and not r.output.strip():
 			return ToolResult("No matches.")

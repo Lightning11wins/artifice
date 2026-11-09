@@ -903,6 +903,17 @@ class GlobFallbackTest(unittest.TestCase):
 		self.assertIn(f"{d}/a.txt:1:needle one\n{d}/a.txt:3:needle three", out)
 		self.assertIn(f"{d}/a.txt: binary file matches", out)
 
+	def test_grep_fallback_searches_a_git_directory_by_name(self):
+		with mock.patch.object(tools.shutil, "which", return_value=None):
+			t = tools.Tools(mock.Mock())
+		t.sandbox.run.side_effect = lambda argv, **kw: Result(
+			output=subprocess.run(argv, capture_output=True, text=True).stdout, exit_code=0)
+		with tempfile.TemporaryDirectory() as d:
+			Path(d, ".git").mkdir()
+			Path(d, ".git", "config").write_text("needle\n")
+			out = t.call("grep_search", json.dumps({"pattern": "needle", "path": f"{d}/.git"})).text
+		self.assertEqual(out, f"{d}/.git/config:1:needle")
+
 	def test_grep_fallback_rejects_a_newline_in_the_pattern(self):
 		with mock.patch.object(tools.shutil, "which", return_value=None):
 			t = tools.Tools(mock.Mock())
