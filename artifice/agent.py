@@ -93,6 +93,7 @@ class Agent:
 
 	def _loop(self) -> None:
 		overflowed_at: int | None = None  # history bytes at the last overflow
+		replaced_at = float("inf")  # history bytes after the last replacement, so replacements cannot cycle
 		while True:
 			self.maybe_compact()
 			max_tokens = self._max_tokens()
@@ -106,14 +107,16 @@ class Agent:
 				self.bytes_per_token = max(0.5, min(self.bytes_per_token, size / self.context_length))
 				self.usage_tokens, self.usage_n = self.context_length, len(self.messages)
 				if overflowed_at is not None and size >= overflowed_at:
-					if not self._replace_largest(e) or self._history_bytes() >= overflowed_at:
+					if not self._replace_largest(e) or self._history_bytes() >= min(overflowed_at, replaced_at):
 						raise
-					size = self._history_bytes()
+					replaced_at = self._history_bytes()
 					self.usage_tokens = None  # count the shrunk history again, at the lowered bytes_per_token
-				overflowed_at = size
+					overflowed_at = None  # compact again before replacing more
+				else:
+					overflowed_at = size
 				self.ui.notice("The conversation is over the context limit. Compacting.")
 				continue
-			overflowed_at = None
+			overflowed_at, replaced_at = None, float("inf")
 			self.messages.append(message)
 			self.chat.save()
 			if stop_reason == "length":

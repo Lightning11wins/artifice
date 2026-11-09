@@ -254,7 +254,7 @@ class AgentTest(TempDataTest):
 		self.assertEqual(agent.messages[-1]["content"], "done")
 		self.assertNotIn("x" * 80000, [m["content"] for m in Chat.load(chat.id).messages])
 
-	def test_an_earlier_message_too_long_for_the_context_is_summarized(self):
+	def test_an_earlier_message_too_long_for_the_context_is_replaced(self):
 		# Left by Ctrl-C, a server error or an older version; digits are a token each.
 		for earlier in ("x" * 80000, "1" * 30000):
 			with self.subTest(earlier=earlier[:1]):
@@ -265,6 +265,16 @@ class AgentTest(TempDataTest):
 				self.assertEqual(agent.messages[-1]["content"], "done")
 				self.assertNotIn(earlier, [m["content"] for m in agent.messages])
 				self.assertIn("hi", [m["content"] for m in agent.messages])
+
+	def test_compaction_runs_again_after_a_replacement(self):
+		chat = self.chat(("user", "1" * 30000), ("assistant", "ok"))
+		for _ in range(40):
+			chat.messages += [{"role": "user", "content": "2" * 120}, {"role": "assistant", "content": "3" * 120}]
+		client = OverflowClient(limit=16000)
+		agent = Agent(CountingClient(client), chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=16384)
+		agent.send("4" * 8000)
+		self.assertEqual(agent.messages[-1]["content"], "done")
+		self.assertEqual(client.summaries, 1)
 
 	def test_replacing_a_summary_does_not_loop(self):
 		class LongNotesClient(OverflowClient):
