@@ -228,6 +228,18 @@ class AgentTest(TempDataTest):
 				agent.send("go")
 				self.assertEqual(agent.messages[-1]["content"], "done")
 
+	def test_an_overflow_does_not_inflate_estimates_after_the_server_counts_again(self):
+		client = OverflowClient(limit=16000)
+		client.usage = {"prompt_tokens": 5000, "completion_tokens": 10}
+		agent = Agent(client, self.chat(), FakeTools(output="1" * 20000), Settings(model="m"), QuietUI(),
+			context_length=16384)
+		client.calls = 1
+		agent.send("go")
+		agent.tools, client.calls = FakeTools(output="y" * 20000), 1
+		agent.send("again")
+		self.assertIn("y" * 20000, [m["content"] for m in agent.messages])
+		self.assertEqual(client.summaries, 0)
+
 	def test_estimate_skips_reasoning_before_the_last_user_message(self):
 		chat = self.chat(("user", "earlier"))
 		chat.messages.append({"role": "assistant", "content": "ok", "reasoning_content": "r" * 80000})

@@ -65,7 +65,7 @@ class Agent:
 
 	@property
 	def bytes_per_token(self) -> float:
-		"""Lowered when the server rejects a request as too long."""
+		"""Lowered when the server rejects a request as too long, until it reports usage again."""
 		return self.chat.bytes_per_token or BYTES_PER_TOKEN
 
 	@bytes_per_token.setter
@@ -253,6 +253,7 @@ class Agent:
 					if usage.get("prompt_tokens") is not None:
 						self.usage_tokens = usage["prompt_tokens"] + (usage.get("completion_tokens") or 0)
 						self.usage_n = len(self.messages) + 1  # counts the reply about to be appended
+						self.bytes_per_token = BYTES_PER_TOKEN  # the count covers any dense text that lowered it
 					self.context_length = usage.get("context_length") or self.context_length
 		except BaseException:
 			if display:
