@@ -106,6 +106,8 @@ def glob_files(pattern: str, path: str) -> str:
 	for root, dirs, files in os.walk(path):  # does not follow symlinked directories
 		dirs[:] = [d for d in dirs if d != ".git"]
 		for name in files:
+			if name == ".git":  # a submodule or worktree link
+				continue
 			full = os.path.join(root, name)
 			if regex.match(os.path.relpath(full, path)):
 				matches.append(full)
@@ -121,7 +123,7 @@ def strip_dot_slash(pattern: str) -> str:
 
 def _glob_regex(pattern: str) -> re.Pattern:
 	"""Compiles a glob where ** spans directories, *, ? and [...] stay within one, and {a,b} picks one."""
-	return re.compile(_glob_body(pattern) + r"\Z")
+	return re.compile(_glob_body(pattern) + r"\Z", re.S)
 
 
 def _glob_body(pattern: str, whole: bool = True) -> str:
@@ -163,7 +165,7 @@ def expand_braces(pattern: str, limit: int = 256) -> list[str]:
 	if len(pattern) > 1024:
 		raise ValueError(f"Failed to expand braces: the pattern is {len(pattern)} characters, over 1024")
 	pieces = re.split(r"\{([^{}]*)\}", pattern)
-	literals, groups = pieces[0::2], [group.split(",") for group in pieces[1::2]]
+	literals, groups = pieces[0::2], [_nonempty(group.split(",")) for group in pieces[1::2]]
 	if any("{" in literal for literal in literals):
 		raise ValueError(f"Failed to expand braces: nested or unclosed {{ in {pattern}")
 	if math.prod(len(group) for group in groups) > limit:
@@ -183,11 +185,16 @@ def _brace_alternatives(pattern: str, start: int) -> tuple[list[str], int] | Non
 		elif pattern[i] == "}":
 			depth -= 1
 			if depth == 0:
-				return options + [pattern[begin:i]], i + 1
+				return _nonempty(options + [pattern[begin:i]]), i + 1
 		elif pattern[i] == "," and depth == 1:
 			options.append(pattern[begin:i])
 			begin = i + 1
 	return None
+
+
+def _nonempty(options: list[str]) -> list[str]:
+	"""Brace options without empty ones, which rg drops. {} and {,} match nothing in place."""
+	return [option for option in options if option] or [""]
 
 
 def _kind(mode: int) -> str:

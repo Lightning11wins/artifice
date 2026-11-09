@@ -768,6 +768,12 @@ class GlobFallbackTest(unittest.TestCase):
 			self.assertEqual(helpers.glob_files("{**,x}/c.py", root), "No files matched.")
 			(Path(root) / "tests" / "loop").symlink_to("..")
 			self.assertEqual(names("**/b.py"), ["tests/b.py"])
+			self.assertEqual(names("tests/{,deep/}*.py"), ["tests/deep/c.py"])
+			(Path(root) / "tests" / ".git").write_text("gitdir: elsewhere\n")
+			self.assertEqual(names("tests/*"), ["tests/b.py", "tests/f.txt"])
+			(Path(root) / "new\nline").mkdir()
+			(Path(root) / "new\nline" / "g.py").write_text("")
+			self.assertEqual(helpers.glob_files("**/g.py", root), f"{root}/new\nline/g.py")
 
 	def test_leading_dot_slash_is_stripped_for_rg(self):
 		with mock.patch.object(tools.shutil, "which", return_value="/usr/bin/rg"):
@@ -869,8 +875,10 @@ class GlobFallbackTest(unittest.TestCase):
 			Path(d, "sub", "d.ts").write_text("needle\n")
 			out = t.call("grep_search", json.dumps({"pattern": "needle", "path": d, "include": "**/*.{ts,tsx,txt}"})).text
 			bad = t.call("grep_search", json.dumps({"pattern": "needle", "path": d, "include": "sub/*.ts"}))
+			tsx = t.call("grep_search", json.dumps({"pattern": "needle", "path": d, "include": "*.ts{,x}"})).text
 		self.assertEqual(sorted(line.split(":")[0] for line in out.splitlines()), [f"{d}/a.ts", f"{d}/b.tsx", f"{d}/sub/d.ts"])
 		self.assertTrue(bad.error, bad.text)
+		self.assertEqual(tsx, f"{d}/b.tsx:1:needle")
 
 	def test_grep_fallback_limits_brace_expansion(self):
 		with mock.patch.object(tools.shutil, "which", return_value=None):
