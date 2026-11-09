@@ -15,15 +15,12 @@ OUTPUT_TAIL_CHARS = 8000
 SCRATCH_WARN_BYTES = 2 << 30
 # Runs rg inside a directory given as $1, since rg matches globs relative to its working directory.
 # Paths in its output and errors get $2 as a prefix, so they read as if rg had searched $1. A file in $1 is
-# searched directly.
+# searched directly, and only without a glob filter, which rg would ignore for it.
 RG_IN_DIR = (
 	'dir=$1 prefix=$2 filter=$3; shift 3; '
-	# rg searches a file named on its command line even when the glob filter excludes it.
 	'if [ ! -d "$dir" ]; then '
 	'if [ -n "$filter" ] && [ -e "$dir" ]; then '
-	'"$1" --files --max-depth 0 -g "$filter" -- . >/dev/null; [ $? -eq 2 ] && exit 2; '  # reports a bad glob
-	'(cd -- "$(dirname -- "$dir")" && "$1" --files -L --hidden --no-ignore --max-depth 1 -g "$filter" -- . 2>/dev/null) '
-	'| grep -qxF -- "./$(basename -- "$dir")" || exit 1; '
+	'echo "Error: $dir is not a directory, so the glob $filter cannot filter it. Search its directory instead."; exit 2; '
 	'fi; exec "$@" -- "$dir"; fi; '
 	'cd -- "$dir" || exit 2; set -o pipefail; '
 	# Flushing each line keeps the results found so far when a timeout kills the search.
@@ -195,7 +192,7 @@ class Tools:
 
 
 def _rg_in(path: str, argv: list[str], name_glob: str) -> list[str]:
-	"""Runs rg in path and prefixes results with it; a file path is searched only if its name matches name_glob."""
+	"""Runs rg in path and prefixes results with it. A file path with a name_glob is an error."""
 	prefix = path.rstrip("/") + "/" if path.rstrip("/") else "/"
 	where = "./-" if path == "-" else path  # cd and rg read a bare - as $OLDPWD and stdin
 	return ["bash", "-c", RG_IN_DIR, "bash", where, prefix, name_glob, *argv]
