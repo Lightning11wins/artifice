@@ -205,10 +205,26 @@ class AgentTest(TempDataTest):
 
 		client.stream = stream
 		agent._loop()
-		self.assertIn("over the context limit", " ".join(ui.notices))
 		self.assertNotIn("hit max_tokens", " ".join(ui.notices))
 		self.assertEqual(chat.messages[-1]["content"], "done")
 		self.assertFalse(any(m.get("tool_calls") and m["tool_calls"][0]["id"] == "c0" for m in chat.messages))
+
+	def test_a_reply_cut_off_by_the_context_is_kept_when_compacting_cannot_help(self):
+		cases = {
+			"the request fills the context": ([("user", "x" * 130000)], 32700),
+			"the context is half full": ([("user", "go"), ("assistant", "ok"), ("user", "write a lot")], 17000),
+		}
+		for name, (history, prompt) in cases.items():
+			with self.subTest(name):
+				chat = self.chat(*history)
+				client = FakeClient(usage={"prompt_tokens": prompt, "completion_tokens": 32768 - prompt}, stop="length")
+				ui = QuietUI()
+				agent = Agent(CountingClient(client), chat, FakeTools(), Settings(model="m"), ui, context_length=32768)
+				agent._loop()
+				self.assertEqual([m["content"] for m in chat.messages[1:]], [c for _, c in history] + ["done"])
+				self.assertIn("hit max_tokens", " ".join(ui.notices))
+				self.assertEqual(client.summaries, 0)
+				self.assertEqual(agent.bytes_per_token, 3.0)
 
 	def test_estimate_counts_utf8_bytes(self):
 		chat = self.chat(("user", "中文注释" * 3000))
