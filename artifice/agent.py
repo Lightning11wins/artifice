@@ -168,7 +168,7 @@ class Agent:
 		last_user = max((i for i, m in enumerate(self.messages) if m["role"] == "user"), default=0)
 		parts = []  # (is the current request, bytes freed, message index, key, tool call index)
 		for i, m in enumerate(self.messages):
-			if m["role"] == "system":
+			if m["role"] == "system" or _is_summary(m):  # summaries fit by their token cap, and would be redone
 				continue
 			content = m.get("content") or ""
 			parts.append((i == last_user, _size(content) - _size(self._note(m, len(content))), i, "content", 0))

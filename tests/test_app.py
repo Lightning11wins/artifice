@@ -285,13 +285,26 @@ class AgentTest(TempDataTest):
 			[("assistant", None), ("tool", "c1"), ("user", None)])
 
 	def test_a_message_too_long_for_the_context_is_removed(self):
-		chat = self.chat(("user", "earlier"), ("assistant", "ok"))
-		agent = Agent(CountingClient(OverflowClient(limit=16000)), chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=16384)
-		with self.assertRaisesRegex(LLMError, "too long for the context \\(80,000 characters\\)"):
-			agent.send("x" * 80000)
-		agent.send("hi")
-		self.assertEqual(agent.messages[-1]["content"], "done")
-		self.assertNotIn("x" * 80000, [m["content"] for m in Chat.load(chat.id).messages])
+		class NotesClient(OverflowClient):
+			def stream(self, body):
+				if body["messages"][-1]["content"].startswith("Stop here."):
+					self.summaries += 1
+					yield {"token": notes}
+					return
+				yield from super().stream(body)
+
+		for notes in ("notes", "n" * 400):  # a summary over MIN_ELIDE_CHARS must not be the part replaced
+			with self.subTest(notes=len(notes)):
+				chat = self.chat(("user", "earlier"), ("assistant", "ok"))
+				agent = Agent(CountingClient(NotesClient(limit=16000)), chat, FakeTools(), Settings(model="m"), QuietUI(),
+					context_length=16384)
+				with self.assertRaisesRegex(LLMError, "too long for the context \\(80,000 characters\\)"):
+					agent.send("x" * 80000)
+				saved = [m["content"] for m in Chat.load(chat.id).messages]
+				self.assertNotIn("x" * 80000, saved)
+				self.assertIn(notes, saved[1])
+				agent.send("hi")
+				self.assertEqual(agent.messages[-1]["content"], "done")
 
 	def test_an_earlier_message_too_long_for_the_context_is_replaced(self):
 		# Left by Ctrl-C, a server error or an older version; digits are a token each.
@@ -342,7 +355,7 @@ class AgentTest(TempDataTest):
 		chat = self.chat(("user", "x" * 2000), ("assistant", "ok"))
 		agent = Agent(CountingClient(LongNotesClient(limit=16000), cap=40), chat, FakeTools(), Settings(model="m"),
 			QuietUI(), context_length=16384)
-		with self.assertRaisesRegex(LLMError, "context size"):
+		with self.assertRaisesRegex(LLMError, "too long for the context"):
 			agent.send("1" * 15800)
 
 	def test_the_reply_is_saved_when_stdout_is_closed(self):
