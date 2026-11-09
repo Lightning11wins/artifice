@@ -106,7 +106,7 @@ class Agent:
 				self.bytes_per_token = max(0.5, min(self.bytes_per_token, size / self.context_length))
 				self.usage_tokens, self.usage_n = self.context_length, len(self.messages)
 				if overflowed_at is not None and size >= overflowed_at:
-					if not self._replace_largest(e) or self._history_bytes() >= size:
+					if not self._replace_largest(e) or self._history_bytes() >= overflowed_at:
 						raise
 					size = self._history_bytes()
 				overflowed_at = size
@@ -130,37 +130,43 @@ class Agent:
 			self.chat.save()
 
 	def _replace_largest(self, error: LLMError) -> bool:
-		"""Replaces the largest message text with a note, for an overflow compaction cannot fix. False if none is left.
+		"""Replaces the text whose note frees the most bytes, for an overflow compaction cannot fix. False if none is left.
 
-		Raises LLMError when that text is the current request, which cannot be answered without it."""
+		The current request goes last, and raises LLMError, since it cannot be answered without it."""
 		last_user = max((i for i, m in enumerate(self.messages) if m["role"] == "user"), default=0)
-		parts = []
+		parts = []  # (is the current request, bytes freed, message index, key, tool call index)
 		for i, m in enumerate(self.messages):
 			if m["role"] == "system":
 				continue
-			parts.append((len((m.get("content") or "").encode()), i, "content"))
+			content = m.get("content") or ""
+			parts.append((i == last_user, _size(content) - _size(self._note(m, len(content))), i, "content", 0))
 			if i > last_user:
-				parts.append((len((m.get("reasoning_content") or "").encode()), i, "reasoning_content"))
-			if m.get("tool_calls"):
-				parts.append((len(json.dumps(m["tool_calls"])), i, "tool_calls"))
-		size, i, key = max(parts, default=(0, 0, ""))
-		if size <= MIN_ELIDE_CHARS:
+				parts.append((False, _size(m.get("reasoning_content") or ""), i, "reasoning_content", 0))
+			for j, call in enumerate(m.get("tool_calls") or []):
+				args = call.get("function", {}).get("arguments") or ""
+				parts.append((False, _size(json.dumps(args)) - _size(json.dumps(_call_note(args))), i, "tool_calls", j))
+		parts = sorted((p for p in parts if p[1] > MIN_ELIDE_CHARS), key=lambda p: (p[0], -p[1]))
+		if not parts:
 			return False
+		request, freed, i, key, j = parts[0]
 		m = self.messages[i]
 		if key == "reasoning_content":
 			del m[key]
 		elif key == "tool_calls":
-			note = json.dumps({"note": TOO_LONG.format(chars=size)})
-			for call in m["tool_calls"]:
-				call.setdefault("function", {})["arguments"] = note
+			fn = m["tool_calls"][j].setdefault("function", {})
+			fn["arguments"] = _call_note(fn.get("arguments") or "")
 		else:
 			chars = len(m["content"])
-			m["content"] = TOO_LARGE.format(chars=chars) if m["role"] == "tool" else TOO_LONG.format(chars=chars)
+			m["content"] = self._note(m, chars)
 		self.chat.save()
-		if i == last_user and key == "content":
+		if request:
 			raise LLMError(f"Failed to send: the message is too long for the context ({chars:,} characters).") from error
-		self.ui.notice(f"Replaced the longest message ({m['role']}, {size:,} bytes) with a note to fit the context.")
+		self.ui.notice(f"Replaced a long {m['role']} message with a note to fit the context (about {freed:,} bytes freed).")
 		return True
+
+	@staticmethod
+	def _note(m: dict, chars: int) -> str:
+		return (TOO_LARGE if m["role"] == "tool" else TOO_LONG).format(chars=chars)
 
 	def _template_args(self) -> dict:
 		if self.settings.thinking is None:
@@ -337,6 +343,14 @@ def _is_summary(m: dict) -> bool:
 def _is_overflow(e: LLMError) -> bool:
 	text = str(e).lower()
 	return "context size" in text or "exceed_context" in text or "context length" in text
+
+
+def _size(text: str) -> int:
+	return len(text.encode())
+
+
+def _call_note(arguments: str) -> str:
+	return json.dumps({"note": TOO_LONG.format(chars=len(arguments))})
 
 
 def _bytes(m: dict, reasoning: bool = True) -> int:

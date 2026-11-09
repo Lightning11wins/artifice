@@ -57,6 +57,21 @@ class FakeClient:
 		return {"context_length": 1000}
 
 
+class CountingClient:
+	"""Fails a test that sends more than `cap` requests, so a retry loop fails rather than hangs."""
+
+	def __init__(self, client, cap: int = 20):
+		self.client = client
+		self.cap = cap
+		self.requests = 0
+
+	def stream(self, body):
+		self.requests += 1
+		if self.requests > self.cap:
+			raise AssertionError("the overflow retry did not stop")
+		return self.client.stream(body)
+
+
 class OverflowClient(FakeClient):
 	"""Rejects requests over `limit` tokens, as a server does past its context. A digit is a token, as in Qwen."""
 
@@ -65,7 +80,10 @@ class OverflowClient(FakeClient):
 		self.limit = limit
 
 	def stream(self, body):
-		text = "".join((m.get("content") or "") + json.dumps(m.get("tool_calls") or "") for m in body["messages"])
+		messages = body["messages"]
+		last_user = max(i for i, m in enumerate(messages) if m["role"] == "user")
+		text = "".join((m.get("content") or "") + json.dumps(m.get("tool_calls") or "")
+			+ (m.get("reasoning_content") or "" if i > last_user else "") for i, m in enumerate(messages))
 		digits = sum(c.isdigit() for c in text)
 		if digits + (len(text) - digits) / 4 > self.limit:
 			raise LLMError("Failed to generate: the request exceeds the available context size")
@@ -228,15 +246,8 @@ class AgentTest(TempDataTest):
 			[("assistant", None), ("tool", "c1"), ("user", None)])
 
 	def test_a_message_too_long_for_the_context_is_removed(self):
-		class CountingClient(OverflowClient):
-			def stream(self, body):
-				self.requests = getattr(self, "requests", 0) + 1
-				if self.requests > 20:
-					raise AssertionError("the overflow retry did not stop")
-				yield from super().stream(body)
-
 		chat = self.chat(("user", "earlier"), ("assistant", "ok"))
-		agent = Agent(CountingClient(limit=16000), chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=16384)
+		agent = Agent(CountingClient(OverflowClient(limit=16000)), chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=16384)
 		with self.assertRaisesRegex(LLMError, "too long for the context \\(80,000 characters\\)"):
 			agent.send("x" * 80000)
 		agent.send("hi")
@@ -255,6 +266,76 @@ class AgentTest(TempDataTest):
 				self.assertEqual(agent.client.summaries, 1)
 				self.assertIn("hi", [m["content"] for m in agent.messages])
 
+	def test_replacing_a_summary_does_not_loop(self):
+		class LongNotesClient(OverflowClient):
+			def stream(self, body):
+				if body["messages"][-1]["content"].startswith("Stop here."):
+					yield {"token": "n" * 1000}
+					return
+				yield from super().stream(body)
+
+		client = LongNotesClient(limit=1500)
+		client.calls = 200
+		agent = Agent(CountingClient(client, cap=300), self.chat(("user", "earlier"), ("assistant", "ok")),
+			FakeTools(output="ok"), Settings(model="m"), QuietUI(), context_length=16384)
+		with self.assertRaisesRegex(LLMError, "context size"):
+			agent.send("go")
+
+	def test_the_largest_piece_by_bytes_freed_is_replaced_first(self):
+		calls = [{"id": f"r{i}", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "a"}'}}
+			for i in range(8)]
+		chat = self.chat(("user", "1" * 800), ("user", "1" * 800))
+		chat.messages.append({"role": "assistant", "content": "", "tool_calls": calls})
+		chat.messages += [{"role": "tool", "tool_call_id": c["id"], "content": "ok"} for c in calls]
+		chat.messages.append({"role": "assistant", "content": "ok"})
+		ui = QuietUI()
+		agent = Agent(OverflowClient(limit=1200), chat, FakeTools(), Settings(model="m"), ui, context_length=16384)
+		agent.send("hi")
+		self.assertEqual(agent.messages[-1]["content"], "done")
+		self.assertEqual([n.split(" with")[0] for n in ui.notices if n.startswith("Replaced")],
+			["Replaced a long user message"])
+
+	def test_the_current_message_is_replaced_last(self):
+		chat = self.chat(("user", "go"))
+		chat.messages.append({"role": "assistant", "content": "", "tool_calls": [{"id": "d", "type": "function",
+			"function": {"name": "run_shell_command", "arguments": json.dumps({"command": "1" * 12000})}}]})
+		chat.messages.append({"role": "tool", "tool_call_id": "d", "content": "ok"})
+		chat.messages.append({"role": "user", "content": "a" * 20000})
+		agent = Agent(OverflowClient(limit=8000), chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=16384)
+		agent._loop()
+		self.assertEqual(agent.messages[-1]["content"], "done")
+		self.assertIn("a" * 20000, [m["content"] for m in agent.messages])
+
+	def test_the_system_prompt_is_never_replaced(self):
+		chat = self.chat()
+		chat.messages[0]["content"] = "1" * 20000
+		agent = Agent(CountingClient(OverflowClient(limit=16000)), chat, FakeTools(), Settings(model="m"), QuietUI(),
+			context_length=16384)
+		with self.assertRaisesRegex(LLMError, "context size"):
+			agent.send("hi")
+		self.assertEqual(agent.messages[0]["content"], "1" * 20000)
+
+	def test_reasoning_too_long_for_the_context_is_replaced(self):
+		class ThinkingClient(OverflowClient):
+			def stream(self, body):
+				if self.calls and not body["messages"][-1]["content"].startswith("Stop here."):
+					yield {"reasoning": "1" * 30000}
+				yield from super().stream(body)
+
+		client = ThinkingClient(limit=16000)
+		client.calls = 1
+		agent = Agent(client, self.chat(), FakeTools(output="ok"), Settings(model="m"), QuietUI(), context_length=16384)
+		agent.send("go")
+		self.assertEqual(agent.messages[-1]["content"], "done")
+
+	def test_reasoning_the_server_no_longer_sees_is_not_replaced(self):
+		chat = self.chat(("user", "earlier"))
+		chat.messages.append({"role": "assistant", "content": "ok", "reasoning_content": "1" * 80000})
+		chat.messages += [{"role": "user", "content": "1" * 30000}, {"role": "assistant", "content": "ok"}]
+		agent = Agent(OverflowClient(limit=16000), chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=16384)
+		agent.send("hi")
+		self.assertEqual(agent.messages[-1]["content"], "done")
+
 	def test_earlier_tool_call_arguments_too_long_for_the_context_are_replaced(self):
 		chat = self.chat(("user", "write it"))
 		chat.messages += [
@@ -268,18 +349,11 @@ class AgentTest(TempDataTest):
 		self.assertEqual(agent.messages[-1]["content"], "done")
 
 	def test_an_overflow_nothing_can_shrink_stops(self):
-		class CountingClient(OverflowClient):
-			def stream(self, body):
-				self.requests = getattr(self, "requests", 0) + 1
-				if self.requests > 20:
-					raise AssertionError("the overflow retry did not stop")
-				yield from super().stream(body)
-
 		chat = self.chat(("user", "go"))
 		chat.messages.append({"role": "assistant", "content": "", "tool_calls": [{"id": f"c{i}", "type": "function",
 			"function": {"name": "glob", "arguments": "{}"}} for i in range(8)]})
 		chat.messages += [{"role": "tool", "tool_call_id": f"c{i}", "content": "ok"} for i in range(8)]
-		agent = Agent(CountingClient(limit=100), chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=16384)
+		agent = Agent(CountingClient(OverflowClient(limit=100)), chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=16384)
 		with self.assertRaisesRegex(LLMError, "context size"):
 			agent.send("hi")
 
