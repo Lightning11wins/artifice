@@ -182,7 +182,8 @@ class Tools:
 			if include_ignored:
 				argv.append("--no-ignore")
 		else:
-			argv = ["grep", "-rnHE", "--line-buffered", "--binary-files=without-match", "--exclude-dir=.git"]
+			# The C locale keeps lines that are not valid UTF-8, which grep treats as binary in UTF-8 locales.
+			argv = ["env", "LC_ALL=C", "grep", "-rnHE", "--line-buffered", "--binary-files=without-match", "--exclude-dir=.git"]
 			if include:
 				# grep's --include matches file names and has no braces.
 				names = [re.sub(r"^(\*\*/)+", "", p) for p in expand_braces(include)]
