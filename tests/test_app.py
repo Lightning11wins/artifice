@@ -318,6 +318,37 @@ class AgentTest(TempDataTest):
 			agent.send("hi")
 		self.assertEqual(Chat.load(chat.id).messages[-1]["role"], "assistant")
 
+	def test_the_reply_is_shown_when_saving_it_fails(self):
+		chat = self.chat()
+		save = chat.save
+
+		def full_disk():
+			if chat.messages[-1]["role"] == "assistant":
+				raise OSError(28, "No space left on device")
+			save()
+
+		chat.save = full_disk
+		out = io.StringIO()
+		ui = cli.TerminalUI(answer_out=out, trace_out=io.StringIO())
+		agent = Agent(FakeClient(), chat, FakeTools(), Settings(model="m"), ui, context_length=32768)
+		with self.assertRaises(OSError):
+			agent.send("hi")
+		self.assertEqual(out.getvalue(), "done\n")
+
+	def test_a_partial_reply_is_shown_when_the_stream_fails(self):
+		class BrokenClient(FakeClient):
+			def stream(self, body):
+				yield {"reasoning": "thinking"}
+				yield {"token": "partial"}
+				raise LLMError("Failed to generate: the stream ended without [DONE]")
+
+		out = io.StringIO()
+		ui = cli.TerminalUI(answer_out=out, trace_out=io.StringIO())
+		agent = Agent(BrokenClient(), self.chat(), FakeTools(), Settings(model="m"), ui, context_length=32768)
+		with self.assertRaises(LLMError):
+			agent.send("hi")
+		self.assertEqual(out.getvalue(), "partial\n")
+
 	def test_undecodable_text_is_counted(self):
 		chat = self.chat()
 		chat.messages[0]["content"] += os.fsdecode(b" in /caf\xe9")
