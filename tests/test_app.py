@@ -875,7 +875,7 @@ class GlobFallbackTest(unittest.TestCase):
 			Path(d, ".github").mkdir()
 			Path(d, ".github", "ci.yml").write_text("--verbose\n")
 			Path(d, ".git").mkdir()
-			Path(d, ".git", "notes").write_text("--verbose\n")
+			Path(d, ".git", "notes.yml").write_text("--verbose\n")
 			Path(d, os.fsdecode(b"n\xff.yml")).write_text("")
 			for rg in ([shutil.which("rg")] if shutil.which("rg") else []) + [None]:
 				with self.subTest(rg=rg):
@@ -884,6 +884,7 @@ class GlobFallbackTest(unittest.TestCase):
 					t.sandbox.run.side_effect = run
 					glob = t.call("glob", json.dumps({"pattern": "*.yml", "path": d}))
 					self.assertIn(f"{d}/.github/ci.yml", glob.text)
+					self.assertNotIn(".git/", glob.text)
 					self.assertFalse(glob.error, glob.text)
 					grep = t.call("grep_search", json.dumps({"pattern": "--verbose", "path": d, "context": 10**30}))
 					self.assertEqual(grep.text, f"{d}/.github/ci.yml:1:--verbose")
