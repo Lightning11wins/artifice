@@ -381,17 +381,17 @@ def _main() -> None:
 			chat = app.new_chat()
 		app.open_chat(chat)
 	except (LLMError, SandboxError, OSError, ValueError) as e:
-		sys.exit(str(e))
+		sys.exit(_printable(str(e)))
 
 	if args.prompt is not None:
 		try:
 			app.agent.send(args.prompt)
 		except LLMError as e:
-			sys.exit(str(e))
+			sys.exit(_printable(str(e)))  # server errors can quote model output
 		except BrokenPipeError:
 			raise  # main() exits quietly
 		except OSError as e:
-			sys.exit(f"Failed to finish the turn: {e}")
+			sys.exit(_printable(f"Failed to finish the turn: {e}"))
 		return
 	app.repl()
 

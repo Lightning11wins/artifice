@@ -1038,6 +1038,31 @@ class TerminalUITest(unittest.TestCase):
 		self.assertNotRegex(written, r"[\x1b\x07\x9b]")
 		self.assertIn("a\\x1b]52;c;cHduZWQ=\\x07b\\x9b2J\tc\n", written)
 
+	def test_every_trace_line_is_escaped(self):
+		answer, trace = io.StringIO(), io.StringIO()
+		ui = cli.TerminalUI(answer_out=answer, trace_out=trace)
+		ui.reasoning("\x1b[2Jthinking")
+		ui.token("\x1b[2Jheld")
+		ui.end_stream()
+		ui.tool_call("run_shell_command", json.dumps({"command": "\x1b[2Jls"}))
+		ui.notice("\x1b[2Jnotice")
+		self.assertNotIn("\x1b", answer.getvalue() + trace.getvalue())
+		self.assertEqual((answer.getvalue() + trace.getvalue()).count("\\x1b[2J"), 4)
+
+	def test_one_shot_errors_are_escaped(self):
+		args = argparse.Namespace(prompt="x", resume=None, cont=False)
+		error = LLMError("Failed to parse \x1b]52;c;cHduZWQ=\x07")
+		for failing in ("open_chat", "agent.send"):
+			with self.subTest(failing=failing):
+				app = mock.Mock()
+				app.configure_mock(**{f"{failing}.side_effect": error})
+				with mock.patch.object(cli, "parse_args", return_value=args), \
+						mock.patch.object(cli.deps, "ensure", return_value=True), \
+						mock.patch.object(cli, "clean_scratch"), mock.patch.object(cli, "scratch_root"), \
+						mock.patch.object(cli, "App", return_value=app), self.assertRaises(SystemExit) as exit:
+					cli._main()
+				self.assertEqual(exit.exception.code, "Failed to parse \\x1b]52;c;cHduZWQ=\\x07")
+
 
 if __name__ == "__main__":
 	unittest.main()
