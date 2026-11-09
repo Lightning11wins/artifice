@@ -306,6 +306,37 @@ class AgentTest(TempDataTest):
 		with self.assertRaisesRegex(LLMError, "context size"):
 			agent.send("1" * 15800)
 
+	def test_a_later_step_can_replace_again(self):
+		class ScriptedClient(FakeClient):
+			steps = 0
+
+			def stream(self, body):
+				if body["messages"][-1]["content"].startswith("Stop here."):
+					raise LLMError("Failed to generate: HTTP 500")
+				self.steps += 1
+				if self.steps in (1, 2, 4, 5):
+					raise LLMError("Failed to generate: the request exceeds the available context size")
+				if self.steps == 3:
+					yield {"tool_calls": [{"id": "w", "type": "function", "function": {"name": "run_shell_command",
+						"arguments": json.dumps({"command": "z" * 5000})}}]}
+					return
+				yield {"token": "done"}
+
+		chat = self.chat(("user", "x" * 30000), ("assistant", "ok"))
+		agent = Agent(ScriptedClient(), chat, FakeTools(output="ok"), Settings(model="m"), QuietUI(), context_length=16384)
+		agent.send("go")
+		self.assertEqual(agent.messages[-1]["content"], "done")
+
+	def test_an_overflow_compacts_even_when_the_server_reported_less(self):
+		client = OverflowClient(limit=16000)
+		client.calls, client.usage = 1, {"prompt_tokens": 7600, "completion_tokens": 10}
+		chat = self.chat(("user", "hello"), ("assistant", "a" * 30000))
+		agent = Agent(CountingClient(client), chat, FakeTools(output="1" * 9000), Settings(model="m"), QuietUI(),
+			context_length=16384)
+		agent.send("go")
+		self.assertEqual(agent.messages[-1]["content"], "done")
+		self.assertEqual(client.summaries, 1)
+
 	def test_the_largest_piece_by_bytes_freed_is_replaced_first(self):
 		calls = [{"id": f"r{i}", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "a"}'}}
 			for i in range(8)]
@@ -358,9 +389,9 @@ class AgentTest(TempDataTest):
 		chat = self.chat(("user", "write it"))
 		chat.messages += [
 			{"role": "assistant", "content": "", "tool_calls": [
+				{"id": "r", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "a"}'}},
 				{"id": "w", "type": "function", "function": {"name": "run_shell_command",
-					"arguments": json.dumps({"command": "x" * 80000})}},
-				{"id": "r", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "a"}'}}]},
+					"arguments": json.dumps({"command": "x" * 80000})}}]},
 			{"role": "tool", "tool_call_id": "w", "content": "ok"},
 			{"role": "tool", "tool_call_id": "r", "content": "ok"},
 			{"role": "user", "content": "hi"},
@@ -368,8 +399,8 @@ class AgentTest(TempDataTest):
 		agent = Agent(OverflowClient(limit=16000), chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=16384)
 		agent._loop()
 		self.assertEqual(agent.messages[-1]["content"], "done")
-		self.assertIn("Removed", agent.messages[2]["tool_calls"][0]["function"]["arguments"])
-		self.assertEqual(agent.messages[2]["tool_calls"][1]["function"]["arguments"], '{"path": "a"}')
+		self.assertEqual(agent.messages[2]["tool_calls"][0]["function"]["arguments"], '{"path": "a"}')
+		self.assertIn("Removed", agent.messages[2]["tool_calls"][1]["function"]["arguments"])
 
 	def test_reasoning_the_server_no_longer_sees_is_not_replaced(self):
 		chat = self.chat(("user", "earlier"))
