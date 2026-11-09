@@ -245,5 +245,8 @@ def describe_call(name: str, arguments: str) -> str:
 		return f"{name}({arguments})"
 	if name == "run_shell_command" and "command" in args:
 		return f"$ {args['command']}"
-	parts = ", ".join(f"{k}={json.dumps(v)}" for k, v in args.items())
+	try:
+		parts = ", ".join(f"{k}={json.dumps(v)}" for k, v in args.items())
+	except RecursionError:
+		return f"{name}({arguments})"
 	return f"{name}({parts})"

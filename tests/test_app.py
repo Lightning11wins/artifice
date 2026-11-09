@@ -627,6 +627,10 @@ class ToolsTest(unittest.TestCase):
 		self.assertIn("not a valid JSON object", result.text)
 		t.sandbox.run.assert_not_called()
 
+	def test_arguments_too_deep_to_show_are_shown_raw(self):
+		with mock.patch.object(tools.json, "dumps", side_effect=RecursionError):
+			self.assertEqual(tools.describe_call("read_file", '{"path": [[]]}'), 'read_file({"path": [[]]})')
+
 	def test_nul_in_arguments_is_an_error(self):
 		t = tools.Tools(mock.Mock())
 		for name, args in (("read_file", {"path": "a\0b"}), ("run_shell_command", {"command": "echo a\0b"})):
