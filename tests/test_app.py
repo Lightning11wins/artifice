@@ -618,6 +618,15 @@ class ToolsTest(unittest.TestCase):
 				self.assertTrue(result.error)
 				self.assertIn("path must be a string", result.text)
 
+	def test_deeply_nested_arguments_are_an_error(self):
+		arguments = "[" * 20000
+		self.assertEqual(tools.describe_call("read_file", arguments), f"read_file({arguments})")
+		t = tools.Tools(mock.Mock())
+		result = t.call("read_file", arguments)
+		self.assertTrue(result.error)
+		self.assertIn("not a valid JSON object", result.text)
+		t.sandbox.run.assert_not_called()
+
 	def test_nul_in_arguments_is_an_error(self):
 		t = tools.Tools(mock.Mock())
 		for name, args in (("read_file", {"path": "a\0b"}), ("run_shell_command", {"command": "echo a\0b"})):

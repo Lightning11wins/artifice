@@ -116,7 +116,7 @@ class Tools:
 			args = json.loads(arguments or "{}")
 			if not isinstance(args, dict):
 				raise ValueError("arguments must be a JSON object")
-		except ValueError as e:
+		except (ValueError, RecursionError) as e:
 			return ToolResult(f"Error: arguments for {name} are not a valid JSON object ({e}): {arguments}", True)
 		method = getattr(self, f"_{name}", None)
 		schema = next((s["function"] for s in self.schemas if s["function"]["name"] == name), None)
@@ -239,7 +239,7 @@ def describe_call(name: str, arguments: str) -> str:
 	"""One-line summary of a tool call for display."""
 	try:
 		args = json.loads(arguments or "{}")
-	except ValueError:
+	except (ValueError, RecursionError):
 		return f"{name}({arguments})"
 	if not isinstance(args, dict):
 		return f"{name}({arguments})"
