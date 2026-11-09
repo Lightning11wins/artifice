@@ -450,6 +450,24 @@ print("left:", left)
 					stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
 				self.assertIn("left: []", r.stdout, r.stdout + r.stderr)
 
+	def test_a_command_cannot_write_to_the_users_terminal(self):
+		# The sandbox keeps Artifice's session for sudo, so only bwrap's new session hides the terminal.
+		root = Path(__file__).resolve().parent.parent
+		code = f"""
+import sys
+sys.path.insert(0, {str(root)!r})
+from pathlib import Path
+from artifice.sandbox import READ_ONLY, Sandbox
+r = Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(
+	["sh", "-c", "printf 'RAW%sTTY' - > /dev/tty && echo opened || echo refused"])
+print("result:", r.output.strip().splitlines()[-1])
+"""
+		argv = [sys.executable, "-I", "-c", code]
+		r = subprocess.run(["script", "-qec", shlex.join(argv), "/dev/null"],
+			stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+		self.assertIn("result: refused", r.stdout, r.stdout + r.stderr)
+		self.assertNotIn("RAW-TTY", r.stdout)
+
 	def test_a_sandbox_interrupted_while_starting_does_not_outlive_it(self):
 		# bwrap starting late leaves a window before --die-with-parent applies.
 		wrapper = Path(tempfile.mkdtemp(dir=HOST_DIR)) / "slow-bwrap"
