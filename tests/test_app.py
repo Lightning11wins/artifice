@@ -854,6 +854,31 @@ class GlobFallbackTest(unittest.TestCase):
 			self.assertIn(f"{path}:1:needle", t.call("grep_search", json.dumps({**grep, "include": "*.txt"})).text)
 			self.assertIn(f"{path}:1:needle", t.call("grep_search", json.dumps(grep)).text)
 
+	def test_search_options_reach_rg_and_grep(self):
+		def run(argv, **kw):
+			p = subprocess.run(argv, capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL,
+				env={**os.environ, "LC_ALL": "en_US.UTF-8"})  # not C.UTF-8, where Python escapes undecodable bytes
+			return Result(output=p.stdout + p.stderr, exit_code=p.returncode)
+
+		with tempfile.TemporaryDirectory() as d:
+			Path(d, ".github").mkdir()
+			Path(d, ".github", "ci.yml").write_text("--verbose\n")
+			Path(d, ".git").mkdir()
+			Path(d, ".git", "notes").write_text("--verbose\n")
+			Path(d, os.fsdecode(b"n\xff.yml")).write_text("")
+			for rg in ([shutil.which("rg")] if shutil.which("rg") else []) + [None]:
+				with self.subTest(rg=rg):
+					with mock.patch.object(tools.shutil, "which", return_value=rg):
+						t = tools.Tools(mock.Mock())
+					t.sandbox.run.side_effect = run
+					glob = t.call("glob", json.dumps({"pattern": "*.yml", "path": d}))
+					self.assertIn(f"{d}/.github/ci.yml", glob.text)
+					self.assertFalse(glob.error, glob.text)
+					grep = t.call("grep_search", json.dumps({"pattern": "--verbose", "path": d, "context": 10**30}))
+					self.assertEqual(grep.text, f"{d}/.github/ci.yml:1:--verbose")
+					self.assertEqual(t.call("grep_search", json.dumps({"pattern": "absent", "path": d})).text, "No matches.")
+					self.assertTrue(t.call("grep_search", json.dumps({"pattern": "(", "path": d})).error)
+
 	def test_a_timed_out_search_keeps_what_it_found(self):
 		def run(argv, timeout=None, **kw):
 			p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)

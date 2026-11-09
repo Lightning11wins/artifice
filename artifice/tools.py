@@ -198,7 +198,7 @@ class Tools:
 		if ignore_case:
 			argv.append("-i")
 		if context:
-			argv += ["-C", str(int(context))]
+			argv += ["-C", str(min(int(context), 1000))]  # GNU grep spins forever at -C 2**63-1
 		argv += ["-e", pattern]
 		r = self.sandbox.run(_rg_in(path, argv, include) if self.rg else argv + ["--", path], timeout=120)
 		if r.exit_code == 1 and not r.output.strip():
