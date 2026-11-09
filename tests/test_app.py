@@ -877,9 +877,11 @@ class GlobFallbackTest(unittest.TestCase):
 			out = t.call("grep_search", json.dumps({"pattern": "needle", "path": d, "include": "**/*.{ts,tsx,txt}"})).text
 			bad = t.call("grep_search", json.dumps({"pattern": "needle", "path": d, "include": "sub/*.ts"}))
 			tsx = t.call("grep_search", json.dumps({"pattern": "needle", "path": d, "include": "*.ts{,x}"})).text
+			ts = t.call("grep_search", json.dumps({"pattern": "needle", "path": d, "include": "*.ts{}"})).text
 		self.assertEqual(sorted(line.split(":")[0] for line in out.splitlines()), [f"{d}/a.ts", f"{d}/b.tsx", f"{d}/sub/d.ts"])
 		self.assertTrue(bad.error, bad.text)
 		self.assertEqual(tsx, f"{d}/b.tsx:1:needle")
+		self.assertEqual(sorted(ts.splitlines()), [f"{d}/a.ts:1:needle", f"{d}/sub/d.ts:1:needle"])
 
 	def test_grep_fallback_limits_brace_expansion(self):
 		with mock.patch.object(tools.shutil, "which", return_value=None):
