@@ -185,46 +185,20 @@ class AgentTest(TempDataTest):
 		Agent(client, self.chat(), FakeTools(), Settings(model="m"), ui, context_length=32768).send("hi")
 		self.assertIn(f"Response hit max_tokens ({client.max_tokens[0]})", " ".join(ui.notices))
 
-	def test_a_reply_cut_off_by_the_context_is_compacted_and_retried(self):
-		# Digits take a token each, so the estimate of this output is a third of the real count.
-		chat = self.chat(("user", "go"), ("assistant", "ok"), ("user", "read it"))
-		chat.messages += [
-			{"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",
-				"function": {"name": "read_file", "arguments": "{}"}}]},
-			{"role": "tool", "tool_call_id": "c1", "content": "1" * 29000},
-		]
-		client = FakeClient(calls=1, usage={"prompt_tokens": 32000, "completion_tokens": 768}, stop="length")
+	def test_a_reply_cut_off_by_the_context_is_kept_and_the_next_message_compacts(self):
+		history = [("user", "go"), ("assistant", "ok")] * 4 + [("user", "write a lot")]
+		chat = self.chat(*history)
+		client = FakeClient(usage={"prompt_tokens": 17000, "completion_tokens": 15768}, stop="length")
 		ui = QuietUI()
 		agent = Agent(CountingClient(client), chat, FakeTools(), Settings(model="m"), ui, context_length=32768)
-		real_stream = client.stream
-
-		def stream(body):
-			if len(client.max_tokens) == 1 and not body["messages"][-1]["content"].startswith("Stop here."):
-				client.usage, client.stop = {"prompt_tokens": 9000, "completion_tokens": 10}, ""  # after compaction
-			yield from real_stream(body)
-
-		client.stream = stream
-		agent._loop()
-		self.assertNotIn("hit max_tokens", " ".join(ui.notices))
+		agent.send("x")
 		self.assertEqual(chat.messages[-1]["content"], "done")
-		self.assertFalse(any(m.get("tool_calls") and m["tool_calls"][0]["id"] == "c0" for m in chat.messages))
-
-	def test_a_reply_cut_off_by_the_context_is_kept_when_compacting_cannot_help(self):
-		cases = {
-			"the request fills the context": ([("user", "x" * 130000)], 32700),
-			"the context is half full": ([("user", "go"), ("assistant", "ok"), ("user", "write a lot")], 17000),
-		}
-		for name, (history, prompt) in cases.items():
-			with self.subTest(name):
-				chat = self.chat(*history)
-				client = FakeClient(usage={"prompt_tokens": prompt, "completion_tokens": 32768 - prompt}, stop="length")
-				ui = QuietUI()
-				agent = Agent(CountingClient(client), chat, FakeTools(), Settings(model="m"), ui, context_length=32768)
-				agent._loop()
-				self.assertEqual([m["content"] for m in chat.messages[1:]], [c for _, c in history] + ["done"])
-				self.assertIn("hit max_tokens", " ".join(ui.notices))
-				self.assertEqual(client.summaries, 0)
-				self.assertEqual(agent.bytes_per_token, 3.0)
+		self.assertIn("ran out of context", " ".join(ui.notices))
+		self.assertNotIn("hit max_tokens", " ".join(ui.notices))
+		self.assertEqual((client.summaries, agent.bytes_per_token), (0, 3.0))
+		client.usage, client.stop = None, ""
+		agent.send("continue")
+		self.assertEqual(client.summaries, 1)  # the server's count of the long reply triggers compaction
 
 	def test_estimate_counts_utf8_bytes(self):
 		chat = self.chat(("user", "中文注释" * 3000))

@@ -48,7 +48,6 @@ class Agent:
 		# Tokens in messages[:usage_n] per the server's last usage report.
 		self.usage_tokens: int | None = None
 		self.usage_n = 0
-		self.prompt_tokens = 0  # in the last request, per the server
 		self.bytes_per_token = BYTES_PER_TOKEN  # lowered when the server rejects a request as too long
 
 	@property
@@ -118,20 +117,15 @@ class Agent:
 				self.ui.notice("The conversation is over the context limit. Compacting.")
 				continue
 			overflowed_at, replaced_at = None, float("inf")
-			if stop_reason == "length" and self._reply_ran_out_of_context():
-				# The estimate was low, and the server cut the reply, dropping a partial tool call. Retry if compacting makes room.
-				self.ui.end_stream(tool_calls=bool(message.get("tool_calls")))
-				self.usage_tokens, self.usage_n = self.prompt_tokens, len(self.messages)
-				before = self.estimate_tokens()
-				self.maybe_compact()
-				if self.estimate_tokens() < before:
-					continue
 			self.messages.append(message)
 			try:
 				self.chat.save()
 			finally:  # after the save, so a reply is kept even if the reader of stdout is gone
 				self.ui.end_stream(tool_calls=bool(message.get("tool_calls")))
-			if stop_reason == "length":
+			if stop_reason == "length" and self._reply_ran_out_of_context():
+				# The estimate was low. The server's usage report corrects it, so the next message compacts first.
+				self.ui.notice("The response ran out of context and was cut off. Send another message to continue.")
+			elif stop_reason == "length":
 				self.ui.notice(f"Response hit max_tokens ({max_tokens}) and was cut off.")
 			calls = message.get("tool_calls") or []
 			if not calls:
@@ -190,7 +184,7 @@ class Agent:
 		return {"enable_thinking": self.settings.thinking}
 
 	def _reply_ran_out_of_context(self) -> bool:
-		reported = self.usage_tokens is not None and self.usage_n == len(self.messages) + 1  # by this reply
+		reported = self.usage_tokens is not None and self.usage_n == len(self.messages)  # by the reply just appended
 		return reported and self.usage_tokens >= self.context_length - CONTEXT_SLACK
 
 	def _max_tokens(self) -> int:
@@ -235,8 +229,7 @@ class Agent:
 				elif "usage" in event and messages is self.messages:
 					usage = event["usage"] or {}
 					if usage.get("prompt_tokens") is not None:
-						self.prompt_tokens = usage["prompt_tokens"]
-						self.usage_tokens = self.prompt_tokens + (usage.get("completion_tokens") or 0)
+						self.usage_tokens = usage["prompt_tokens"] + (usage.get("completion_tokens") or 0)
 						self.usage_n = len(self.messages) + 1  # counts the reply about to be appended
 					self.context_length = usage.get("context_length") or self.context_length
 		except BaseException:
