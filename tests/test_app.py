@@ -647,6 +647,14 @@ class OpenChatTest(TempDataTest):
 			app.open_chat(chat)
 		self.assertEqual((chat.usage_tokens, chat.bytes_per_token), (None, None))
 
+	def test_a_new_chat_in_tmp_starts_in_home(self):
+		# The sandbox's /tmp is the model's scratch, not the host directory.
+		app = self.app()
+		with mock.patch.object(cli.os, "getcwd", return_value="/tmp/project"):
+			chat = app.new_chat()
+		self.assertEqual(chat.cwd, str(Path.home()))
+		self.assertNotIn("/tmp/project", chat.messages[0]["content"])
+
 	def test_chat_open_elsewhere_does_not_load_its_model(self):
 		app = self.app()
 		app.client.load = mock.Mock()
@@ -909,6 +917,32 @@ class SearchTest(unittest.TestCase):
 				self.assertTrue(result.error)
 				self.assertIn("unpaired surrogate", result.text)
 		t.sandbox.run.assert_not_called()
+
+	def test_awkward_directory_names_are_searched_as_named(self):
+		with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as home:
+			Path(home, "decoy.txt").write_text("needle\n")
+			Path(d, "decoy.txt").write_text("needle\n")
+			for name in ("-P", "a b", "locked"):
+				os.mkdir(os.path.join(d, name))
+				Path(d, name, "z.txt").write_text("needle\n")
+			t = tools.Tools(mock.Mock())
+
+			def run(argv, **kw):
+				p = subprocess.run(argv, capture_output=True, text=True, cwd=d, env={**os.environ, "HOME": home})
+				return Result(output=p.stdout + p.stderr, exit_code=p.returncode)
+
+			t.sandbox.run.side_effect = run
+			for name in ("-P", "a b"):
+				with self.subTest(name=name):
+					result = t.call("grep_search", json.dumps({"pattern": "needle", "path": name}))
+					self.assertEqual(result.text, f"{name}/z.txt:1:needle")
+			os.chmod(os.path.join(d, "locked"), 0o600)
+			try:
+				result = t.call("grep_search", json.dumps({"pattern": "needle", "path": "locked"}))
+			finally:
+				os.chmod(os.path.join(d, "locked"), 0o700)
+			self.assertTrue(result.error)
+			self.assertNotIn("decoy", result.text)
 
 	def test_leading_dot_slash_is_stripped_for_rg(self):
 		with mock.patch.object(tools.shutil, "which", return_value="/usr/bin/rg"):
