@@ -22,7 +22,7 @@ class LLMClient:
 	def _request(self, method: str, path: str, body: dict | None = None, timeout: float | None = 30) -> object:
 		conn = self._connect(timeout)
 		try:
-			conn.request(method, path, body=json.dumps(body) if body is not None else None,
+			conn.request(method, path, body=_json(body) if body is not None else None,
 				headers={"Content-Type": "application/json"})
 			resp = conn.getresponse()
 			data = resp.read()
@@ -48,7 +48,7 @@ class LLMClient:
 		conn = self._connect(timeout=900)
 		try:
 			try:
-				conn.request("POST", "/run", body=json.dumps(body), headers={"Content-Type": "application/json"})
+				conn.request("POST", "/run", body=_json(body), headers={"Content-Type": "application/json"})
 				resp = conn.getresponse()
 			except (OSError, http.client.HTTPException, UnicodeError) as e:
 				raise LLMError(f"Failed to reach llm-server at {self.host}:{self.port}: {e!r}") from e
@@ -92,3 +92,8 @@ def _error_text(data: bytes) -> str:
 		return json.loads(data).get("error", data.decode(errors="replace"))
 	except (ValueError, AttributeError):
 		return data.decode(errors="replace")
+
+
+def _json(body: dict) -> bytes:
+	"""UTF-8 JSON, with lone surrogates (such as from undecodable file names) replaced."""
+	return json.dumps(body, ensure_ascii=False).encode(errors="replace")

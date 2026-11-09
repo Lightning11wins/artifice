@@ -306,6 +306,13 @@ class AgentTest(TempDataTest):
 		with self.assertRaisesRegex(LLMError, "context size"):
 			agent.send("1" * 15800)
 
+	def test_undecodable_text_is_counted(self):
+		chat = self.chat()
+		chat.messages[0]["content"] += os.fsdecode(b" in /caf\xe9")
+		agent = Agent(FakeClient(), chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=32768)
+		agent.send(os.fsdecode(b"explain caf\xe9"))
+		self.assertEqual(chat.messages[-1]["role"], "assistant")
+
 	def test_a_later_step_can_replace_again(self):
 		class ScriptedClient(FakeClient):
 			steps = 0
@@ -910,14 +917,14 @@ class MainTest(unittest.TestCase):
 
 
 class ClientTest(unittest.TestCase):
-	def stream(self, *lines: str) -> list[dict]:
+	def stream(self, *lines: str, body: dict | None = None) -> list[dict]:
 		import http.server
 		import threading
 		from artifice.client import LLMClient
 
 		class Handler(http.server.BaseHTTPRequestHandler):
 			def do_POST(self):
-				self.rfile.read(int(self.headers["Content-Length"]))
+				received.append(self.rfile.read(int(self.headers["Content-Length"])))
 				self.send_response(200)
 				self.send_header("Content-Type", "text/event-stream")
 				self.end_headers()
@@ -926,13 +933,14 @@ class ClientTest(unittest.TestCase):
 			def log_message(self, *args):
 				pass
 
+		received = self.received = []
 		server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
 		threading.Thread(target=server.serve_forever, daemon=True).start()
 		self.addCleanup(server.server_close)
 		self.addCleanup(server.shutdown)
 		events = []
 		try:
-			for event in LLMClient("127.0.0.1", server.server_address[1]).stream({}):
+			for event in LLMClient("127.0.0.1", server.server_address[1]).stream(body or {}):
 				events.append(event)
 		finally:
 			self.events = events
@@ -940,6 +948,10 @@ class ClientTest(unittest.TestCase):
 
 	def test_stream_yields_events_until_done(self):
 		self.assertEqual(self.stream('{"token": "a"}', "[DONE]", '{"token": "b"}'), [{"token": "a"}])
+
+	def test_undecodable_text_is_sent_as_valid_utf8(self):
+		self.stream("[DONE]", body={"messages": [{"role": "user", "content": os.fsdecode(b"caf\xe9 caf\xc3\xa9")}]})
+		self.assertEqual(json.loads(self.received[0].decode()), {"messages": [{"role": "user", "content": "caf? café"}]})
 
 	def test_stream_without_done_is_an_error(self):
 		with self.assertRaisesRegex(LLMError, "without \\[DONE\\]"):

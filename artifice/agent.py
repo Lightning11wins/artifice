@@ -87,7 +87,7 @@ class Agent:
 		if self.usage_tokens is None:
 			return
 		last_user = max((i for i, m in enumerate(self.messages) if m["role"] == "user"), default=0)
-		dropped = sum(len((m.get("reasoning_content") or "").encode())
+		dropped = sum(_size(m.get("reasoning_content") or "")
 			for m in self.messages[last_user + 1:self.usage_n] if m["role"] == "assistant")
 		self.usage_tokens -= int(dropped / ELIDED_CHARS_PER_TOKEN)
 
@@ -272,7 +272,7 @@ class Agent:
 			if i > last_user and m["role"] == "assistant" and m.get("reasoning_content")]
 		freed = 0
 		for i in steps[:-1]:
-			size = len(self.messages[i].pop("reasoning_content").encode())
+			size = _size(self.messages[i].pop("reasoning_content"))
 			freed += size if i < self.usage_n else 0
 		estimate = self.estimate_tokens()
 		if len(steps) > 1:
@@ -350,7 +350,7 @@ def _is_overflow(e: LLMError) -> bool:
 
 
 def _size(text: str) -> int:
-	return len(text.encode())
+	return len(text.encode(errors="surrogatepass"))
 
 
 def _call_note(arguments: str) -> str:
@@ -359,9 +359,9 @@ def _call_note(arguments: str) -> str:
 
 def _bytes(m: dict, reasoning: bool = True) -> int:
 	"""UTF-8 bytes, which track tokens better than characters for text like CJK."""
-	n = len((m.get("content") or "").encode())
+	n = _size(m.get("content") or "")
 	if reasoning:
-		n += len((m.get("reasoning_content") or "").encode())
+		n += _size(m.get("reasoning_content") or "")
 	if m.get("tool_calls"):
 		n += len(json.dumps(m["tool_calls"]))
 	return n
