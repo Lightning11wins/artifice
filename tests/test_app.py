@@ -291,6 +291,21 @@ class AgentTest(TempDataTest):
 		with self.assertRaisesRegex(LLMError, "context size"):
 			agent.send("go")
 
+	def test_a_replaced_summary_written_again_does_not_loop(self):
+		class LongNotesClient(OverflowClient):
+			def stream(self, body):
+				if body["messages"][-1]["content"].startswith("Stop here."):
+					self.summaries += 1
+					yield {"token": "n" * 1000}
+					return
+				yield from super().stream(body)
+
+		chat = self.chat(("user", "x" * 2000), ("assistant", "ok"))
+		agent = Agent(CountingClient(LongNotesClient(limit=16000), cap=40), chat, FakeTools(), Settings(model="m"),
+			QuietUI(), context_length=16384)
+		with self.assertRaisesRegex(LLMError, "context size"):
+			agent.send("1" * 15800)
+
 	def test_the_largest_piece_by_bytes_freed_is_replaced_first(self):
 		calls = [{"id": f"r{i}", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "a"}'}}
 			for i in range(8)]
