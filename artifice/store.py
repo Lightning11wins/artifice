@@ -82,9 +82,17 @@ class Chat:
 			raise FileNotFoundError(f"Failed to pick a chat: {chat_id!r} matches {names}")
 		try:
 			with open(matches[0]) as f:
-				return cls(**json.load(f))
+				chat = cls(**json.load(f))
 		except (ValueError, TypeError) as e:
 			raise ValueError(f"Failed to load chat {matches[0]}: {e}") from e
+		if not _named_for(chat, matches[0]):
+			raise ValueError(f"Failed to load chat {matches[0]}: its id {chat.id!r} is not its file name")
+		return chat
+
+
+def _named_for(chat: Chat, path: Path) -> bool:
+	"""Whether the chat's id is its file name, since the id names its save file and scratch directory."""
+	return chat.id == path.stem and not chat.id.startswith(".")
 
 
 def list_chats(limit: int = 20) -> list[Chat]:
@@ -95,7 +103,9 @@ def list_chats(limit: int = 20) -> list[Chat]:
 			break
 		try:
 			with open(p) as f:
-				chats.append(Chat(**json.load(f)))
+				chat = Chat(**json.load(f))
 		except (OSError, ValueError, TypeError):
 			continue
+		if _named_for(chat, p):
+			chats.append(chat)
 	return chats

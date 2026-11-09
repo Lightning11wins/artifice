@@ -21,7 +21,7 @@ from artifice import cli, deps, helpers, tools  # noqa: E402
 from artifice.agent import Agent, Settings  # noqa: E402
 from artifice.client import LLMError  # noqa: E402
 from artifice.sandbox import READ_ONLY, Result, Sandbox, SandboxError  # noqa: E402
-from artifice.store import Chat, scratch_root  # noqa: E402
+from artifice.store import Chat, chats_dir, list_chats, scratch_root  # noqa: E402
 from artifice.tools import ToolResult  # noqa: E402
 
 
@@ -1114,6 +1114,30 @@ class StoreTest(TempDataTest):
 		self.assertEqual(chat.path.parent.stat().st_mode & 0o777, 0o700)
 		self.assertEqual(scratch_root().stat().st_mode & 0o777, 0o700)
 
+
+	def test_a_chat_whose_id_is_not_its_file_name_is_refused(self):
+		# The id names the chat's save file and the sandbox's writable scratch directory.
+		for name, chat_id in (("x", "../../../.."), ("y", "z"), (".", "."), (".h", ".h")):
+			with self.subTest(chat_id=chat_id):
+				chat = self.chat(("user", "hi"))
+				data = {**json.loads(json.dumps(chat.__dict__)), "id": chat_id}
+				(chats_dir() / f"{name}.json").write_text(json.dumps(data))
+				with self.assertRaisesRegex(ValueError, "is not its file name"):
+					Chat.load(str(chats_dir() / f"{name}.json"))
+				self.assertNotIn(chat_id, [c.id for c in list_chats()])
+
+	def test_a_failed_save_keeps_the_previous_file(self):
+		chat = self.chat(("user", "kept"))
+		chat.save()
+		chat.messages.append({"role": "user", "content": "lost"})
+
+		def dump(obj, f, **kw):
+			f.write('{"id": ')
+			raise OSError(28, "No space left on device")
+
+		with mock.patch.object(json, "dump", dump), self.assertRaises(OSError):
+			chat.save()
+		self.assertEqual(Chat.load(chat.id).messages[-1]["content"], "kept")
 
 class DepsTest(unittest.TestCase):
 	def test_rg_is_required(self):
