@@ -854,6 +854,7 @@ class GlobFallbackTest(unittest.TestCase):
 			self.assertIn(f"{path}:1:needle", t.call("grep_search", json.dumps({**grep, "include": "*.txt"})).text)
 			self.assertIn(f"{path}:1:needle", t.call("grep_search", json.dumps(grep)).text)
 
+	@unittest.skipUnless(sys.getfilesystemencoding() == "utf-8", "file names decode to surrogates only from UTF-8")
 	def test_helpers_print_undecodable_names(self):
 		with tempfile.TemporaryDirectory() as d:
 			Path(d, os.fsdecode(b"n\xff.yml")).write_text("")
@@ -866,7 +867,8 @@ class GlobFallbackTest(unittest.TestCase):
 
 	def test_search_options_reach_rg_and_grep(self):
 		def run(argv, **kw):
-			p = subprocess.run(argv, capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL, timeout=30)
+			p = subprocess.run(argv, capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL, timeout=30,
+				env={"PATH": os.environ["PATH"], "LANG": "C.UTF-8"})  # like the sandbox's --clearenv
 			return Result(output=p.stdout + p.stderr, exit_code=p.returncode)
 
 		with tempfile.TemporaryDirectory() as d:
