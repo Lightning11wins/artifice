@@ -149,21 +149,9 @@ def exit_on_sigterm() -> None:
 			signal.signal(signum, lambda signum, frame: sys.exit(128 + signum))
 
 
-history_added = 0  # lines this process added to readline's history
-
-
-def _input(prompt: str) -> str:
-	global history_added
-	line = input(prompt)
-	if line:
-		readline.add_history(line)
-		history_added += 1
-	return line
-
-
 def read_input() -> str | None:
 	try:
-		line = _input("\n\001\033[1;32m\002>\001\033[0m\002 " if sys.stdout.isatty() else "\n> ")
+		line = input("\n\001\033[1;32m\002>\001\033[0m\002 " if sys.stdout.isatty() else "\n> ")
 	except EOFError:
 		return None
 	if not line.lstrip().startswith('"""'):
@@ -180,7 +168,7 @@ def read_input() -> str | None:
 	lines = [first] if first.strip() else []
 	while True:
 		try:
-			more = _input("... ")
+			more = input("... ")
 		except EOFError:
 			break
 		# Terminals with bracketed paste deliver a paste as one line; others leave the rest of it waiting.
@@ -316,38 +304,41 @@ class App:
 			readline.read_history_file(history)
 		except OSError:
 			pass
-		readline.set_auto_history(False)  # _input counts the lines it adds, since history-size can drop old ones
-		start = history_added
 		self.banner()
 		print("Type /help for commands.")
-		try:
-			while True:
+		while True:
+			try:
+				line = read_input()
+			except KeyboardInterrupt:
+				print()
+				continue
+			if line is None:
+				break
+			if not line.strip():
+				continue
+			if sys.stdin.isatty():  # piped input is not typed history
+				self.save_history(history, line)
+			if is_command(line):
 				try:
-					line = read_input()
+					if not self.command(line.strip()):
+						break
+				except (SandboxError, LLMError) as e:
+					self.ui.notice(str(e))
+				except OSError as e:
+					self.ui.notice(f"Failed to run {line.split()[0]}: {e}")
 				except KeyboardInterrupt:
-					print()
-					continue
-				if line is None:
-					break
-				if not line.strip():
-					continue
-				if is_command(line):
-					try:
-						if not self.command(line.strip()):
-							break
-					except (SandboxError, LLMError) as e:
-						self.ui.notice(str(e))
-					except OSError as e:
-						self.ui.notice(f"Failed to run {line.split()[0]}: {e}")
-					except KeyboardInterrupt:
-						self.ui.notice("Interrupted.")
-					continue
-				self.turn(line)
-		finally:
-			# Appending keeps lines that other sessions saved since this one started.
-			os.close(os.open(history, os.O_WRONLY | os.O_CREAT, 0o600))
-			readline.append_history_file(min(history_added - start, readline.get_current_history_length()), history)
-			os.chmod(history, 0o600)
+					self.ui.notice("Interrupted.")
+				continue
+			self.turn(line)
+
+	def save_history(self, path: Path, line: str) -> None:
+		"""Appends a message to the input history file, which concurrent sessions share."""
+		try:
+			with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "a", errors="backslashreplace") as f:
+				os.fchmod(f.fileno(), 0o600)
+				f.write(line + "\n")
+		except OSError as e:
+			self.ui.notice(f"Failed to save input history to {path}: {e}")
 
 	def turn(self, text: str) -> None:
 		try:
