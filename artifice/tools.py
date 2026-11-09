@@ -184,14 +184,17 @@ class Tools:
 			if "\n" in pattern:  # grep would split it into patterns, any of which matches
 				return ToolResult(f"Error: the pattern contains a newline, but grep matches one line at a time: {pattern!r}", True)
 			# grep reports files with NUL bytes or invalid UTF-8 as "binary file matches" in place of those lines.
-			# grep's --exclude-dir=.git also skips a .git named as the path.
-			argv = ["grep", "-rnHE", "--line-buffered"] + (["--exclude-dir=.git"] if Path(path).name != ".git" else [])
+			argv = ["grep", "-rnHE", "--line-buffered"]
 			if include:
 				# grep's --include matches file names and has no braces.
 				names = [re.sub(r"^(\*\*/)+", "", p) for p in expand_braces(include)]
 				if any("/" in name for name in names):
 					return ToolResult(f"Error: include matches file names only without ripgrep: {include}", True)
 				argv += [f"--include={name}" for name in names]
+			# The last matching --include or --exclude wins, and the first decides files that match none.
+			# grep's --exclude-dir and --exclude also skip a .git named as the path. A .git file links a submodule or worktree.
+			if Path(path).name != ".git":
+				argv += ["--exclude-dir=.git", "--exclude=.git"]
 		if ignore_case:
 			argv.append("-i")
 		if context:
