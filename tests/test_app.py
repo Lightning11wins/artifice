@@ -887,6 +887,12 @@ class GlobFallbackTest(unittest.TestCase):
 				helpers.expand_braces("{a,b}" * 200)
 		product.assert_not_called()
 
+	def test_schemas_say_rg_globs_find_ignored_files(self):
+		from artifice.tools import schemas
+		glob, grep = (s["function"]["description"] for s in schemas(True) if s["function"]["name"] in ("glob", "grep_search"))
+		self.assertIn("directories ignored by .gitignore", glob)
+		self.assertIn("with include, ignored files it matches are searched", grep)
+
 	def test_schemas_without_rg_do_not_offer_gitignore(self):
 		from artifice.tools import schemas
 		text = str(schemas(False))
