@@ -123,7 +123,7 @@ class Agent:
 			finally:  # after the save, so a reply is kept even if the reader of stdout is gone
 				self.ui.end_stream(tool_calls=bool(message.get("tool_calls")))
 			if stop_reason == "length" and self._reply_ran_out_of_context():
-				# The estimate was low. The server's usage report corrects it, so the next message compacts first.
+				# The estimate was low. The server's usage report corrects it for the next message.
 				self.ui.notice("The response ran out of context and was cut off. Send another message to continue.")
 			elif stop_reason == "length":
 				self.ui.notice(f"Response hit max_tokens ({max_tokens}) and was cut off.")
