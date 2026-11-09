@@ -12,6 +12,7 @@ BYTES_PER_TOKEN = 3.0  # UTF-8 bytes per token: a conservative guess used only u
 ELIDED_CHARS_PER_TOKEN = 6.0  # low guess at the tokens elision frees, so the estimate errs high
 MIN_ELIDE_CHARS = 300
 SUMMARY_MAX_TOKENS = 4096
+CONTEXT_SLACK = 16  # a reply that ends this close to the context ran out of room, not out of max_tokens
 
 
 @dataclass
@@ -99,6 +100,10 @@ class Agent:
 			max_tokens = self._max_tokens()
 			try:
 				message, stop_reason = self._generate(self.messages, self._template_args(), max_tokens)
+				if stop_reason == "length" and self._reply_ran_out_of_context():
+					# The server cuts the reply, and drops a partial tool call, so this is an overflow too.
+					self.ui.end_stream(tool_calls=bool(message.get("tool_calls")))
+					raise LLMError(f"Failed to generate: the reply ran out of the context length ({self.context_length:,} tokens).")
 			except LLMError as e:
 				if not _is_overflow(e):
 					raise
@@ -178,6 +183,10 @@ class Agent:
 		if self.settings.thinking is None:
 			return {}
 		return {"enable_thinking": self.settings.thinking}
+
+	def _reply_ran_out_of_context(self) -> bool:
+		reported = self.usage_tokens is not None and self.usage_n == len(self.messages) + 1  # by this reply
+		return reported and self.usage_tokens >= self.context_length - CONTEXT_SLACK
 
 	def _max_tokens(self) -> int:
 		room = self.context_length - self.estimate_tokens() - 256

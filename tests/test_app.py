@@ -185,6 +185,31 @@ class AgentTest(TempDataTest):
 		Agent(client, self.chat(), FakeTools(), Settings(model="m"), ui, context_length=32768).send("hi")
 		self.assertIn(f"Response hit max_tokens ({client.max_tokens[0]})", " ".join(ui.notices))
 
+	def test_a_reply_cut_off_by_the_context_is_compacted_and_retried(self):
+		# Digits take a token each, so the estimate of this output is a third of the real count.
+		chat = self.chat(("user", "go"), ("assistant", "ok"), ("user", "read it"))
+		chat.messages += [
+			{"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",
+				"function": {"name": "read_file", "arguments": "{}"}}]},
+			{"role": "tool", "tool_call_id": "c1", "content": "1" * 29000},
+		]
+		client = FakeClient(calls=1, usage={"prompt_tokens": 32000, "completion_tokens": 768}, stop="length")
+		ui = QuietUI()
+		agent = Agent(CountingClient(client), chat, FakeTools(), Settings(model="m"), ui, context_length=32768)
+		real_stream = client.stream
+
+		def stream(body):
+			if len(client.max_tokens) == 1 and not body["messages"][-1]["content"].startswith("Stop here."):
+				client.usage, client.stop = {"prompt_tokens": 9000, "completion_tokens": 10}, ""  # after compaction
+			yield from real_stream(body)
+
+		client.stream = stream
+		agent._loop()
+		self.assertIn("over the context limit", " ".join(ui.notices))
+		self.assertNotIn("hit max_tokens", " ".join(ui.notices))
+		self.assertEqual(chat.messages[-1]["content"], "done")
+		self.assertFalse(any(m.get("tool_calls") and m["tool_calls"][0]["id"] == "c0" for m in chat.messages))
+
 	def test_estimate_counts_utf8_bytes(self):
 		chat = self.chat(("user", "中文注释" * 3000))
 		agent = Agent(FakeClient(), chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=32768)
