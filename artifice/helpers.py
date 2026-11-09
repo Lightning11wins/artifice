@@ -153,15 +153,24 @@ def _glob_body(pattern: str) -> str:
 	return "".join(out)
 
 
-def expand_braces(pattern: str) -> list[str]:
-	"""Expands each {a,b,...} in pattern into separate patterns."""
-	i = pattern.find("{")
-	while i != -1:
-		if alternatives := _brace_alternatives(pattern, i):
+def expand_braces(pattern: str, limit: int = 256) -> list[str]:
+	"""Expands each {a,b,...} in pattern into separate patterns, up to limit of them."""
+	if len(pattern) > 1024:  # each expansion rescans the pattern
+		raise ValueError(f"Failed to expand braces: the pattern is {len(pattern)} characters, over 1024")
+	done, pending = [], [pattern]
+	while pending:
+		p = pending.pop()
+		i = p.find("{")
+		while i != -1 and not (alternatives := _brace_alternatives(p, i)):
+			i = p.find("{", i + 1)
+		if i == -1:
+			done.append(p)
+		else:
 			options, end = alternatives
-			return [p for option in options for p in expand_braces(pattern[:i] + option + pattern[end:])]
-		i = pattern.find("{", i + 1)
-	return [pattern]
+			pending += [p[:i] + option + p[end:] for option in reversed(options)]
+		if len(done) + len(pending) > limit:  # each pending pattern expands to at least one
+			raise ValueError(f"Failed to expand braces: {pattern} has more than {limit} alternatives")
+	return done
 
 
 def _brace_alternatives(pattern: str, start: int) -> tuple[list[str], int] | None:

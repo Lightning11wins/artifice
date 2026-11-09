@@ -847,6 +847,27 @@ class GlobFallbackTest(unittest.TestCase):
 		self.assertEqual(sorted(line.split(":")[0] for line in out.splitlines()), [f"{d}/a.ts", f"{d}/b.tsx", f"{d}/sub/d.ts"])
 		self.assertTrue(bad.error, bad.text)
 
+	def test_grep_fallback_limits_brace_expansion(self):
+		with mock.patch.object(tools.shutil, "which", return_value=None):
+			t = tools.Tools(mock.Mock())
+		t.sandbox.run.return_value = Result(output="", exit_code=1)
+		for include in ("{a,b}" * 12, "{" + ",".join("a" * 300) + "}"):
+			with self.subTest(include=include[:20]):
+				result = t.call("grep_search", json.dumps({"pattern": "x", "include": include}))
+				self.assertTrue(result.error)
+				self.assertIn("Failed to expand braces", result.text)
+		t.sandbox.run.assert_not_called()
+		too_long = t.call("grep_search", json.dumps({"pattern": "x", "include": "{" * 50000 + "a" + "}" * 50000}))
+		self.assertIn("over 1024", too_long.text)
+		t.call("grep_search", json.dumps({"pattern": "x", "include": "{" * 500 + "a" + "}" * 500}))
+		self.assertIn("--include=a", t.sandbox.run.call_args[0][0])
+
+	def test_brace_expansion_stops_before_building_too_many_patterns(self):
+		with mock.patch.object(helpers, "_brace_alternatives", wraps=helpers._brace_alternatives) as split:
+			with self.assertRaisesRegex(ValueError, "more than 256"):
+				helpers.expand_braces("{" + ",".join("a" * 300) + "}{x,y}")
+		self.assertEqual(split.call_count, 1)
+
 	def test_schemas_without_rg_do_not_offer_gitignore(self):
 		from artifice.tools import schemas
 		text = str(schemas(False))
