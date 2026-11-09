@@ -46,7 +46,7 @@ def _schema(name: str, description: str, properties: dict, required: list[str]) 
 
 def schemas(rg: bool) -> list[dict]:
 	"""Tool schemas. Without rg, the fallbacks do not read .gitignore and grep uses grep -E syntax."""
-	ignored = "paths ignored by .gitignore unless include_ignored is true or the {} matches them"  # rg's -g overrides
+	ignored = "Mostly skips paths ignored by .gitignore, though a matching {} can include some; set include_ignored to {} them all."
 
 	def include_ignored(verb: str) -> dict:
 		return {"include_ignored": {"type": "boolean", "description": f"Also {verb} files ignored by .gitignore"}} if rg else {}
@@ -67,8 +67,7 @@ def schemas(rg: bool) -> list[dict]:
 			[]),
 		_schema("glob",
 			"Find files by glob pattern, such as '**/*.py' or 'src/**/test_*.js'. "
-			+ (f"Skips .git and {ignored.format('pattern')}, as '**/*' matches every directory; "
-				"prefer specific patterns like '**/*.py'." if rg else "Skips .git."),
+			+ ("Skips .git. " + ignored.format("pattern", "list") if rg else "Skips .git."),
 			{
 				"pattern": {"type": "string", "description": "Glob pattern, relative to path"},
 				"path": {"type": "string", "description": "Directory to search; defaults to the working directory"},
@@ -78,9 +77,9 @@ def schemas(rg: bool) -> list[dict]:
 		_schema("grep_search",
 			f"Search file contents with a regular expression ({'ripgrep' if rg else 'grep -E'} syntax). "
 			"Returns path:line:text matches. "
-			+ (f"Skips .git, binary files, and {ignored.format('include glob')}." if rg
-				else "Skips .git. Binary files and files that are not UTF-8 show only valid matching lines "
-				"and a 'binary file matches' line."),
+			+ ("Skips .git and binary files. " + ignored.format("include glob", "search") if rg
+				else "Skips .git. For files with NUL bytes or invalid UTF-8, a 'binary file matches' line "
+				"can stand in for some or all matching lines."),
 			{
 				"pattern": {"type": "string", "description": "Regular expression to search for"},
 				"path": {"type": "string", "description": "File or directory to search; defaults to the working directory"},
