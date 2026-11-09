@@ -149,9 +149,21 @@ def exit_on_sigterm() -> None:
 			signal.signal(signum, lambda signum, frame: sys.exit(128 + signum))
 
 
+history_added = 0  # lines this process added to readline's history
+
+
+def _input(prompt: str) -> str:
+	global history_added
+	line = input(prompt)
+	if line:
+		readline.add_history(line)
+		history_added += 1
+	return line
+
+
 def read_input() -> str | None:
 	try:
-		line = input("\n\001\033[1;32m\002>\001\033[0m\002 " if sys.stdout.isatty() else "\n> ")
+		line = _input("\n\001\033[1;32m\002>\001\033[0m\002 " if sys.stdout.isatty() else "\n> ")
 	except EOFError:
 		return None
 	if not line.lstrip().startswith('"""'):
@@ -168,7 +180,7 @@ def read_input() -> str | None:
 	lines = [first] if first.strip() else []
 	while True:
 		try:
-			more = input("... ")
+			more = _input("... ")
 		except EOFError:
 			break
 		# Terminals with bracketed paste deliver a paste as one line; others leave the rest of it waiting.
@@ -304,7 +316,8 @@ class App:
 			readline.read_history_file(history)
 		except OSError:
 			pass
-		start = readline.get_current_history_length()
+		readline.set_auto_history(False)  # _input counts the lines it adds, since history-size can drop old ones
+		start = history_added
 		self.banner()
 		print("Type /help for commands.")
 		try:
@@ -333,7 +346,7 @@ class App:
 		finally:
 			# Appending keeps lines that other sessions saved since this one started.
 			os.close(os.open(history, os.O_WRONLY | os.O_CREAT, 0o600))
-			readline.append_history_file(readline.get_current_history_length() - start, history)
+			readline.append_history_file(min(history_added - start, readline.get_current_history_length()), history)
 			os.chmod(history, 0o600)
 
 	def turn(self, text: str) -> None:

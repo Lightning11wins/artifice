@@ -627,26 +627,29 @@ class OpenChatTest(TempDataTest):
 		self.assertIn("Failed to run /compact", " ".join(app.ui.notices))
 
 	def test_history_keeps_lines_another_session_saved(self):
-		cli.readline.clear_history()
-		self.addCleanup(cli.readline.clear_history)
-		history = cli.data_dir() / "history"
-		history.parent.mkdir(parents=True, exist_ok=True)
-		history.write_text("from before\n")
-		app = self.app()
-		app.turn = mock.Mock()
+		for size in (-1, 1):  # unlimited, and a history-size in inputrc
+			with self.subTest(size=size):
+				cli.readline.clear_history()
+				cli.readline.parse_and_bind(f"set history-size {size}")
+				self.addCleanup(cli.readline.parse_and_bind, "set history-size -1")
+				self.addCleanup(cli.readline.clear_history)
+				history = cli.data_dir() / "history"
+				history.write_text("from before\n")
+				app = self.app()
+				app.turn = mock.Mock()
 
-		def read_input():
-			with open(history, "a") as f:
-				f.write("from another session\n")  # saved while this session runs
-			cli.readline.add_history("from this session")
-			return "from this session"
+				def type_line(prompt):
+					if history.read_text().count("\n") == 2:
+						raise EOFError
+					with open(history, "a") as f:
+						f.write("from another session\n")  # saved while this session runs
+					return "from this session"
 
-		inputs = iter([read_input, lambda: None])
-		with mock.patch.object(cli, "read_input", lambda: next(inputs)()), \
-				mock.patch.object(app, "banner"), mock.patch("builtins.print"):
-			app.repl()
-		self.assertEqual(history.read_text().splitlines(), ["from before", "from another session", "from this session"])
-		self.assertEqual(history.stat().st_mode & 0o777, 0o600)
+				with mock.patch("builtins.input", type_line), \
+						mock.patch.object(app, "banner"), mock.patch("builtins.print"):
+					app.repl()
+				self.assertEqual(history.read_text().splitlines(), ["from before", "from another session", "from this session"])
+				self.assertEqual(history.stat().st_mode & 0o777, 0o600)
 
 	def test_resuming_the_open_chat_keeps_its_sandbox(self):
 		app = self.app()
