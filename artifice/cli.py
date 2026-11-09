@@ -110,6 +110,12 @@ def _positive(text: str) -> float:
 	return float(text)
 
 
+def _positive_int(text: str) -> int:
+	if not int(text) > 0:
+		raise argparse.ArgumentTypeError(f"{text} is not greater than 0")
+	return int(text)
+
+
 def _probability(text: str) -> float:
 	if not 0 < float(text) <= 1:
 		raise argparse.ArgumentTypeError(f"{text} is not in (0, 1]")
@@ -125,7 +131,7 @@ def parse_args() -> argparse.Namespace:
 	p.add_argument("-c", "--continue", dest="cont", action="store_true", help="resume the most recent chat")
 	p.add_argument("-p", "--prompt", help="answer one prompt and exit; the answer goes to stdout, the trace to stderr")
 	p.add_argument("--think", choices=["on", "off"], help="force model thinking on or off")
-	p.add_argument("--max-tokens", type=int, default=16384, help="per-response limit, thinking included")
+	p.add_argument("--max-tokens", type=_positive_int, default=16384, help="per-response limit, thinking included")
 	p.add_argument("--temperature", type=_positive, default=0.6, help="greater than 0")
 	p.add_argument("--top-p", type=_probability, default=0.95, help="greater than 0, at most 1")
 	return p.parse_args()

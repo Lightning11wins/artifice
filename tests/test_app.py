@@ -186,6 +186,15 @@ class AgentTest(TempDataTest):
 		Agent(client, self.chat(), FakeTools(), Settings(model="m"), ui, context_length=32768).send("hi")
 		self.assertIn(f"Response hit max_tokens ({client.max_tokens[0]})", " ".join(ui.notices))
 
+	def test_a_small_max_tokens_is_kept(self):
+		client = FakeClient()
+		Agent(client, self.chat(), FakeTools(), Settings(model="m", max_tokens=100), QuietUI(), context_length=32768).send("hi")
+		self.assertEqual(client.max_tokens, [100])
+		for bad in ("0", "-5"):
+			with self.subTest(bad=bad), mock.patch("sys.argv", ["artifice", "--max-tokens", bad]), \
+					mock.patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+				cli.parse_args()
+
 	def test_a_reply_cut_off_by_the_context_is_kept_and_the_next_message_compacts(self):
 		history = [("user", "go"), ("assistant", "ok")] * 4 + [("user", "write a lot")]
 		chat = self.chat(*history)

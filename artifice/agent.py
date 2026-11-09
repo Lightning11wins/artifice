@@ -211,7 +211,7 @@ class Agent:
 
 	def _max_tokens(self) -> int:
 		room = self.context_length - self.estimate_tokens() - 256
-		return max(256, min(self.settings.max_tokens, room))
+		return min(self.settings.max_tokens, max(256, room))
 
 	def _generate(self, messages: list[dict], template_args: dict, max_tokens: int,
 			display: bool = True) -> tuple[dict, str]:
