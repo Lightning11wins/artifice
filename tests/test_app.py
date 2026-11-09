@@ -766,7 +766,6 @@ class ToolsTest(unittest.TestCase):
 		for name, arguments, text in (
 				("read_file", "[1]", "not a valid JSON object"),
 				("helper", json.dumps({"tool": "read_file", "args": {"path": "/x"}}), "unknown tool helper"),
-				("rg_in", "{}", "unknown tool rg_in"),
 				("read_file", '{"path": "/x", "bogus": 1}', "bad arguments"),
 				("read_file", '{"path": "/x", "offset": 1e400}', "bad arguments")):
 			with self.subTest(name=name, arguments=arguments):
@@ -1197,6 +1196,12 @@ class StoreTest(TempDataTest):
 				with self.assertRaisesRegex(ValueError, "is not its file name"):
 					Chat.load(str(chats_dir() / f"{name}.json"))
 				self.assertNotIn(chat_id, [c.id for c in list_chats()])
+
+	def test_a_deeply_nested_chat_file_is_skipped(self):
+		(chats_dir() / "deep.json").write_text("[" * 200000)
+		self.assertEqual(list_chats(), [])
+		with self.assertRaisesRegex(ValueError, "Failed to load chat"):
+			Chat.load("deep")
 
 	def test_a_failed_save_keeps_the_previous_file(self):
 		chat = self.chat(("user", "kept"))

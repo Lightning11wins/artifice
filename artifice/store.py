@@ -83,7 +83,7 @@ class Chat:
 		try:
 			with open(matches[0]) as f:
 				chat = cls(**json.load(f))
-		except (ValueError, TypeError) as e:
+		except (ValueError, TypeError, RecursionError) as e:
 			raise ValueError(f"Failed to load chat {matches[0]}: {e}") from e
 		if not _named_for(chat, matches[0]):
 			raise ValueError(f"Failed to load chat {matches[0]}: its id {chat.id!r} is not its file name")
@@ -104,7 +104,7 @@ def list_chats(limit: int = 20) -> list[Chat]:
 		try:
 			with open(p) as f:
 				chat = Chat(**json.load(f))
-		except (OSError, ValueError, TypeError):
+		except (OSError, ValueError, TypeError, RecursionError):
 			continue
 		if _named_for(chat, p):
 			chats.append(chat)
