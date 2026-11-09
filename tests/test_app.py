@@ -849,7 +849,7 @@ class GlobFallbackTest(unittest.TestCase):
 				Path(d, name).write_text("needle\n")
 			Path(d, "sub").mkdir()
 			Path(d, "sub", "d.ts").write_text("needle\n")
-			out = t.call("grep_search", json.dumps({"pattern": "needle", "path": d, "include": "**/*.{ts,t{sx,xt}}"})).text
+			out = t.call("grep_search", json.dumps({"pattern": "needle", "path": d, "include": "**/*.{ts,tsx,txt}"})).text
 			bad = t.call("grep_search", json.dumps({"pattern": "needle", "path": d, "include": "sub/*.ts"}))
 		self.assertEqual(sorted(line.split(":")[0] for line in out.splitlines()), [f"{d}/a.ts", f"{d}/b.tsx", f"{d}/sub/d.ts"])
 		self.assertTrue(bad.error, bad.text)
@@ -858,22 +858,22 @@ class GlobFallbackTest(unittest.TestCase):
 		with mock.patch.object(tools.shutil, "which", return_value=None):
 			t = tools.Tools(mock.Mock())
 		t.sandbox.run.return_value = Result(output="", exit_code=1)
-		for include in ("{a,b}" * 12, "{" + ",".join("a" * 300) + "}"):
+		for include in ("{a,b}" * 12, "{" + ",".join("a" * 300) + "}", "*.{ts,t{sx,xt}}", "*.{ts", "{" * 2000):
 			with self.subTest(include=include[:20]):
 				result = t.call("grep_search", json.dumps({"pattern": "x", "include": include}))
 				self.assertTrue(result.error)
 				self.assertIn("Failed to expand braces", result.text)
 		t.sandbox.run.assert_not_called()
-		too_long = t.call("grep_search", json.dumps({"pattern": "x", "include": "{" * 50000 + "a" + "}" * 50000}))
+		too_long = t.call("grep_search", json.dumps({"pattern": "x", "include": "{a}" * 50000}))
 		self.assertIn("over 1024", too_long.text)
-		t.call("grep_search", json.dumps({"pattern": "x", "include": "{" * 500 + "a" + "}" * 500}))
-		self.assertIn("--include=a", t.sandbox.run.call_args[0][0])
+		t.call("grep_search", json.dumps({"pattern": "x", "include": "{a,b}" * 8 + "{c}" * 160}))
+		self.assertEqual(sum(a.startswith("--include=") for a in t.sandbox.run.call_args[0][0]), 256)
 
 	def test_brace_expansion_stops_before_building_too_many_patterns(self):
-		with mock.patch.object(helpers, "_brace_alternatives", wraps=helpers._brace_alternatives) as split:
+		with mock.patch.object(helpers.itertools, "product") as product:
 			with self.assertRaisesRegex(ValueError, "more than 256"):
-				helpers.expand_braces("{" + ",".join("a" * 300) + "}{x,y}")
-		self.assertEqual(split.call_count, 1)
+				helpers.expand_braces("{a,b}" * 200)
+		product.assert_not_called()
 
 	def test_schemas_without_rg_do_not_offer_gitignore(self):
 		from artifice.tools import schemas

@@ -2,7 +2,9 @@
 
 Usage: helpers.py TOOL JSON_ARGS
 """
+import itertools
 import json
+import math
 import os
 import re
 import stat
@@ -154,23 +156,17 @@ def _glob_body(pattern: str) -> str:
 
 
 def expand_braces(pattern: str, limit: int = 256) -> list[str]:
-	"""Expands each {a,b,...} in pattern into separate patterns, up to limit of them."""
-	if len(pattern) > 1024:  # each expansion rescans the pattern
+	"""Expands each {a,b,...} in pattern into separate patterns, up to limit of them. Groups cannot nest, as in rg."""
+	if len(pattern) > 1024:
 		raise ValueError(f"Failed to expand braces: the pattern is {len(pattern)} characters, over 1024")
-	done, pending = [], [pattern]
-	while pending:
-		p = pending.pop()
-		i = p.find("{")
-		while i != -1 and not (alternatives := _brace_alternatives(p, i)):
-			i = p.find("{", i + 1)
-		if i == -1:
-			done.append(p)
-		else:
-			options, end = alternatives
-			pending += [p[:i] + option + p[end:] for option in reversed(options)]
-		if len(done) + len(pending) > limit:  # each pending pattern expands to at least one
-			raise ValueError(f"Failed to expand braces: {pattern} has more than {limit} alternatives")
-	return done
+	pieces = re.split(r"\{([^{}]*)\}", pattern)
+	literals, groups = pieces[0::2], [group.split(",") for group in pieces[1::2]]
+	if any("{" in literal for literal in literals):
+		raise ValueError(f"Failed to expand braces: nested or unclosed {{ in {pattern}")
+	if math.prod(len(group) for group in groups) > limit:
+		raise ValueError(f"Failed to expand braces: {pattern} has more than {limit} alternatives")
+	return ["".join(p for pair in itertools.zip_longest(literals, options, fillvalue="") for p in pair)
+		for options in itertools.product(*groups)]
 
 
 def _brace_alternatives(pattern: str, start: int) -> tuple[list[str], int] | None:
