@@ -21,7 +21,7 @@ from artifice import cli, deps, helpers, tools  # noqa: E402
 from artifice.agent import Agent, Settings  # noqa: E402
 from artifice.client import LLMError  # noqa: E402
 from artifice.sandbox import READ_ONLY, Result, Sandbox, SandboxError  # noqa: E402
-from artifice.store import Chat  # noqa: E402
+from artifice.store import Chat, scratch_root  # noqa: E402
 from artifice.tools import ToolResult  # noqa: E402
 
 
@@ -656,6 +656,20 @@ class OpenChatTest(TempDataTest):
 			app.open_chat(chat)
 			app.open_chat(chat)
 		self.assertEqual(sandbox.call_count, 1)
+		sandbox.return_value.close.assert_not_called()  # closing would release the open chat's lock
+
+	def test_switching_chats_locks_the_new_chat_and_releases_the_old(self):
+		app = self.app()
+		first, second = Chat.new("good", "read-only", "/"), Chat.new("good", "read-only", "/")
+		with mock.patch.object(cli, "Sandbox", side_effect=lambda *a, **kw: mock.Mock(args=a, kwargs=kw)):
+			app.open_chat(first)
+			old = app.agent.tools.sandbox
+			app.open_chat(second)
+		new = app.agent.tools.sandbox
+		self.assertEqual(new.args[1], cli.scratch_root() / second.id)
+		self.assertTrue(new.kwargs["exclusive"])
+		old.close.assert_called_once()
+		new.close.assert_not_called()
 
 	def test_resuming_a_chat_whose_directory_was_deleted_continues_at_home(self):
 		app = self.app()
@@ -1011,12 +1025,15 @@ class ClientTest(unittest.TestCase):
 
 class StoreTest(TempDataTest):
 	def test_saved_chats_are_private(self):
+		self.addCleanup(os.umask, os.umask(0o022))
 		os.makedirs(os.path.join(self.data.name, "artifice"), mode=0o755)
 		os.chmod(os.path.join(self.data.name, "artifice"), 0o755)
 		chat = self.chat(("user", "secret"))
 		chat.save()
 		self.assertEqual(chat.path.stat().st_mode & 0o777, 0o600)
 		self.assertEqual(chat.path.parent.parent.stat().st_mode & 0o777, 0o700)
+		self.assertEqual(chat.path.parent.stat().st_mode & 0o777, 0o700)
+		self.assertEqual(scratch_root().stat().st_mode & 0o777, 0o700)
 
 
 class DepsTest(unittest.TestCase):
