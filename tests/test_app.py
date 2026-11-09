@@ -1145,6 +1145,12 @@ class TerminalUITest(unittest.TestCase):
 		self.assertNotRegex(written, r"[\x1b\x07\x9b]")
 		self.assertIn("a\\x1b]52;c;cHduZWQ=\\x07b\\x9b2J\tc\n", written)
 
+	def test_every_c0_and_c1_control_but_tab_and_newline_is_escaped(self):
+		controls = [chr(c) for c in [*range(0x20), *range(0x7f, 0xa0)] if chr(c) not in "\t\n"]
+		for c in controls:
+			self.assertEqual(cli._printable(f"a{c}b"), f"a\\x{ord(c):02x}b")
+		self.assertEqual(cli._printable("\t\n \xa0~"), "\t\n \xa0~")
+
 	def test_every_trace_line_is_escaped(self):
 		answer, trace = io.StringIO(), io.StringIO()
 		ui = cli.TerminalUI(answer_out=answer, trace_out=trace)
