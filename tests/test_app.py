@@ -812,6 +812,17 @@ class CommandTest(TempDataTest):
 		self.assertFalse(cli.is_command("/etc is huge, why?"))
 		self.assertFalse(cli.is_command("why?"))
 
+	def test_chat_titles_are_escaped(self):
+		chat = self.chat(("user", "explain \x1b]52;c;cHduZWQ=\x07 this"))
+		chat.save()
+		app = cli.App(argparse.Namespace(host="h", port=1, model=None, max_tokens=100, temperature=None, top_p=None,
+			think=None, prompt="x"))
+		out = io.StringIO()
+		with mock.patch("sys.stdout", out):
+			app.command("/chats")
+		self.assertNotIn("\x1b", out.getvalue())
+		self.assertIn("explain \\x1b]52;c;cHduZWQ=\\x07 this", out.getvalue())
+
 	def test_resume_by_path(self):
 		chat = self.chat()
 		chat.save()

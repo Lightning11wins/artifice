@@ -272,7 +272,7 @@ class App:
 			self.banner()
 		elif name == "chats":
 			for c in list_chats():
-				print(f"  {c.id}  {c.updated}  {c.title}")
+				print(_printable(f"  {c.id}  {c.updated}  {c.title}"))
 		elif name == "resume":
 			try:
 				self.open_chat(Chat.load(arg))
