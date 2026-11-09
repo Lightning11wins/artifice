@@ -304,6 +304,7 @@ class App:
 			readline.read_history_file(history)
 		except OSError:
 			pass
+		start = readline.get_current_history_length()
 		self.banner()
 		print("Type /help for commands.")
 		try:
@@ -330,7 +331,9 @@ class App:
 					continue
 				self.turn(line)
 		finally:
-			readline.write_history_file(history)
+			# Appending keeps lines that other sessions saved since this one started.
+			os.close(os.open(history, os.O_WRONLY | os.O_CREAT, 0o600))
+			readline.append_history_file(readline.get_current_history_length() - start, history)
 			os.chmod(history, 0o600)
 
 	def turn(self, text: str) -> None:
