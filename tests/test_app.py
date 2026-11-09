@@ -367,6 +367,15 @@ class AgentTest(TempDataTest):
 		with self.assertRaisesRegex(LLMError, "too long for the context"):
 			agent.send("1" * 15800)
 
+	def test_a_summary_too_long_for_a_smaller_context_is_replaced(self):
+		# Left by a chat compacted on a larger context; digits are a token each.
+		summary = "[Compacted context] " + "1" * 4090
+		agent = Agent(CountingClient(OverflowClient(limit=4000)), self.chat(("user", summary), ("assistant", "ok")),
+			FakeTools(), Settings(model="m"), QuietUI(), context_length=4096)
+		agent.send("hi")
+		self.assertEqual(agent.messages[-1]["content"], "done")
+		self.assertNotIn(summary, [m["content"] for m in agent.messages])
+
 	def test_the_reply_is_saved_when_stdout_is_closed(self):
 		class ClosedPipe(io.StringIO):
 			def write(self, text):
