@@ -42,6 +42,10 @@ class Chat:
 	updated: str = field(default_factory=_now)
 	messages: list[dict] = field(default_factory=list)
 	compactions: int = 0
+	# Token accounting, saved so a resumed chat estimates its size as the live session did.
+	usage_tokens: int | None = None
+	usage_n: int = 0
+	bytes_per_token: float | None = None
 
 	@classmethod
 	def new(cls, model: str, profile: str, cwd: str) -> "Chat":

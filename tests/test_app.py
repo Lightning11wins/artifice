@@ -251,6 +251,17 @@ class AgentTest(TempDataTest):
 		agent.send("next")
 		self.assertEqual(client.summaries, 0)
 
+	def test_a_resumed_chat_keeps_the_servers_token_count(self):
+		chat = self.chat(("user", "z" * 2400), ("assistant", "ok"))
+		live = Agent(FakeClient(), chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=1000)
+		live.usage_tokens, live.usage_n = 300, len(chat.messages)
+		chat.save()
+		client = FakeClient()
+		resumed = Agent(client, Chat.load(chat.id), FakeTools(), Settings(model="m"), QuietUI(), context_length=1000)
+		self.assertEqual(resumed.estimate_tokens(), live.estimate_tokens())
+		resumed.send("thanks")
+		self.assertEqual(client.summaries, 0)
+
 	def test_tool_calls_left_open_by_a_crash_are_answered_on_resume(self):
 		chat = self.chat(("user", "go"))
 		chat.messages.append({"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",
@@ -613,6 +624,15 @@ class OpenChatTest(TempDataTest):
 				app.open_chat(Chat.new("other", "read-only", "/"))
 		self.assertEqual((app.settings.model, app.loaded, app.context_length), ("good", "good", 2000))
 
+
+	def test_another_model_discards_the_saved_token_count(self):
+		app = self.app()
+		app.args.model = "good"
+		chat = Chat.new("other", "read-only", "/")
+		chat.usage_tokens, chat.usage_n, chat.bytes_per_token = 300, 1, 1.5
+		with mock.patch.object(cli, "Sandbox"):
+			app.open_chat(chat)
+		self.assertEqual((chat.usage_tokens, chat.bytes_per_token), (None, None))
 
 	def test_chat_open_elsewhere_does_not_load_its_model(self):
 		app = self.app()

@@ -45,10 +45,32 @@ class Agent:
 		self.settings = settings
 		self.ui = ui
 		self.context_length = context_length
-		# Tokens in messages[:usage_n] per the server's last usage report.
-		self.usage_tokens: int | None = None
-		self.usage_n = 0
-		self.bytes_per_token = BYTES_PER_TOKEN  # lowered when the server rejects a request as too long
+
+	@property
+	def usage_tokens(self) -> int | None:
+		"""Tokens in messages[:usage_n] per the server's last usage report."""
+		return self.chat.usage_tokens
+
+	@usage_tokens.setter
+	def usage_tokens(self, value: int | None) -> None:
+		self.chat.usage_tokens = value
+
+	@property
+	def usage_n(self) -> int:
+		return self.chat.usage_n
+
+	@usage_n.setter
+	def usage_n(self, value: int) -> None:
+		self.chat.usage_n = value
+
+	@property
+	def bytes_per_token(self) -> float:
+		"""Lowered when the server rejects a request as too long."""
+		return self.chat.bytes_per_token or BYTES_PER_TOKEN
+
+	@bytes_per_token.setter
+	def bytes_per_token(self, value: float) -> None:
+		self.chat.bytes_per_token = value
 
 	@property
 	def messages(self) -> list[dict]:

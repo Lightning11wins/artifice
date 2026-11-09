@@ -228,12 +228,15 @@ class App:
 		context_length = self.context_length if model == self.loaded else self.load_model(model)
 		sandbox.check()
 		self.loaded, self.context_length = model, context_length
+		if model != chat.model:  # another tokenizer
+			chat.usage_tokens, chat.bytes_per_token = None, None
 		self.settings.model = chat.model = model
 		if cwd != chat.cwd:
 			self.ui.notice(f"{chat.cwd} no longer exists, so the chat continues in {cwd}.")
 			chat.cwd = cwd
 			if chat.messages and chat.messages[0]["role"] == "system":
 				chat.messages[0] = {"role": "system", "content": system_prompt(cwd, chat.profile)}
+				chat.usage_tokens = None
 		self.agent = Agent(self.client, chat, Tools(sandbox), self.settings, self.ui, self.context_length)
 		if current and current.tools.sandbox is not sandbox:
 			current.tools.sandbox.close()
