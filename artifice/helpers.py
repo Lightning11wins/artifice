@@ -124,17 +124,17 @@ def _glob_regex(pattern: str) -> re.Pattern:
 	return re.compile(_glob_body(pattern) + r"\Z")
 
 
-def _glob_body(pattern: str, at_start: bool = True) -> str:
-	"""at_start is whether pattern begins the whole glob, not just a {a,b} option."""
+def _glob_body(pattern: str, whole: bool = True) -> str:
+	"""whole is whether pattern is the whole glob, not a {a,b} option."""
 	out = []
 	i = 0
 	while i < len(pattern):
-		# ** spans directories only as a whole path component, as in rg. A bare ** option counts only at the start.
+		# ** spans directories only as a whole path component, as in rg. A bare ** option is not one.
 		after_slash = i > 0 and pattern[i - 1] == "/"
 		if (i == 0 or after_slash) and pattern.startswith("**/", i):
 			out.append("(?:.*/)?")
 			i += 3
-		elif (after_slash or i == 0 and at_start) and pattern[i:] == "**":
+		elif (after_slash or i == 0 and whole) and pattern[i:] == "**":
 			out.append(".*")
 			i += 2
 		elif pattern[i] == "*":
@@ -150,9 +150,8 @@ def _glob_body(pattern: str, at_start: bool = True) -> str:
 			out.append("[" + ("^" if negate else "") + body + "]")
 			i = end + 1
 		elif pattern[i] == "{" and (alternatives := _brace_alternatives(pattern, i)):
-			start = i == 0 and at_start
 			options, i = alternatives
-			out.append("(?:" + "|".join(_glob_body(option, start) for option in options) + ")")
+			out.append("(?:" + "|".join(_glob_body(option, False) for option in options) + ")")
 		else:
 			out.append(re.escape(pattern[i]))
 			i += 1
