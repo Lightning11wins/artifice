@@ -767,7 +767,7 @@ class CommandTest(TempDataTest):
 		self.assertEqual(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
 
 	def test_broken_pipe_in_one_shot_mode_reaches_main(self):
-		args = argparse.Namespace(prompt="x", resume=None, cont=False, check_deps=False)
+		args = argparse.Namespace(prompt="x", resume=None, cont=False)
 		app = mock.Mock()
 		app.agent.send.side_effect = BrokenPipeError()
 		with mock.patch.object(cli, "parse_args", return_value=args), \
@@ -788,39 +788,8 @@ class CommandTest(TempDataTest):
 				cli.parse_args()
 
 
-class GlobFallbackTest(unittest.TestCase):
-	def test_matches_like_rg(self):
-		with tempfile.TemporaryDirectory() as root:
-			for name in ("a.py", "tests/b.py", "tests/deep/c.py", ".git/d.py", ".hidden/e.py", "tests/f.txt"):
-				(Path(root) / name).parent.mkdir(parents=True, exist_ok=True)
-				(Path(root) / name).write_text("")
-			names = lambda pattern: [os.path.relpath(p, root) for p in helpers.glob_files(pattern, root).split("\n")]
-			self.assertEqual(names("tests/*.py"), ["tests/b.py"])
-			self.assertEqual(names("*.py"), [".hidden/e.py", "a.py", "tests/b.py", "tests/deep/c.py"])
-			self.assertEqual(helpers.glob_files("*.rs", root), "No files matched.")
-			self.assertEqual(names("**/*.{py,txt}"), [".hidden/e.py", "a.py", "tests/b.py", "tests/deep/c.py", "tests/f.txt"])
-			self.assertEqual(names("{tests/deep,.hidden}/*.py"), [".hidden/e.py", "tests/deep/c.py"])
-			self.assertRegex(helpers.glob_files("[z-a]", root), "^Error: bad glob pattern")
-			with self.assertRaises(FileNotFoundError):
-				helpers.glob_files("*.py", os.path.join(root, "missing"))
-			self.assertEqual(names("./tests/*.py"), ["tests/b.py"])
-			self.assertEqual(names("/tests/*.py"), ["tests/b.py"])
-			self.assertEqual(names("tests/**.py"), ["tests/b.py"])
-			self.assertEqual(helpers.glob_files("t**/c.py", root), "No files matched.")
-			self.assertEqual(names("tests/**"), ["tests/b.py", "tests/deep/c.py", "tests/f.txt"])
-			self.assertEqual(names("tests/{**,x}"), ["tests/b.py", "tests/f.txt"])
-			self.assertEqual(helpers.glob_files("t**", root), "No files matched.")
-			self.assertEqual(helpers.glob_files("{**,x}/c.py", root), "No files matched.")
-			(Path(root) / "tests" / "loop").symlink_to("..")
-			self.assertEqual(names("**/b.py"), ["tests/b.py"])
-			self.assertEqual(names("tests/{,deep/}*.py"), ["tests/deep/c.py"])
-			(Path(root) / "tests" / ".git").write_text("gitdir: elsewhere\n")
-			(Path(root) / "tests" / "link.py").symlink_to("b.py")
-			self.assertEqual(names("tests/*"), ["tests/b.py", "tests/f.txt"])
-			(Path(root) / "new\nline").mkdir()
-			(Path(root) / "new\nline" / "g.py").write_text("")
-			self.assertEqual(helpers.glob_files("**/g.py", root), f"{root}/new\nline/g.py")
-
+@unittest.skipUnless(shutil.which("rg"), "rg is not installed")
+class SearchTest(unittest.TestCase):
 	def test_leading_dot_slash_is_stripped_for_rg(self):
 		with mock.patch.object(tools.shutil, "which", return_value="/usr/bin/rg"):
 			t = tools.Tools(mock.Mock())
@@ -830,20 +799,7 @@ class GlobFallbackTest(unittest.TestCase):
 		globs = [argv[argv.index("-g") + 1] for (argv,), _ in t.sandbox.run.call_args_list]
 		self.assertEqual(globs, ["src/**/*.py", "*.py"])
 
-	def test_grep_fallback_names_a_single_file(self):
-		with mock.patch.object(tools.shutil, "which", return_value=None):
-			t = tools.Tools(mock.Mock())
-		run = lambda argv, **kw: Result(output=subprocess.run(argv, capture_output=True, text=True).stdout, exit_code=0)
-		t.sandbox.run.side_effect = run
-		with tempfile.NamedTemporaryFile("w", suffix=".txt") as f:
-			f.write("a\nneedle\n")
-			f.flush()
-			out = t.call("grep_search", json.dumps({"pattern": "needle", "path": f.name}))
-		self.assertIn(f"{f.name}:2:needle", out.text)
-
 	def test_rg_applies_the_glob_to_a_file_path(self):
-		if not shutil.which("rg"):
-			self.skipTest("rg is not installed")
 		t = tools.Tools(mock.Mock())
 
 		def run(argv, **kw):
@@ -871,15 +827,15 @@ class GlobFallbackTest(unittest.TestCase):
 	@unittest.skipUnless(sys.getfilesystemencoding() == "utf-8", "file names decode to surrogates only from UTF-8")
 	def test_helpers_print_undecodable_names(self):
 		with tempfile.TemporaryDirectory() as d:
-			Path(d, os.fsdecode(b"n\xff.yml")).write_text("")
+			Path(d, os.fsdecode(b"n\xff")).mkdir()
 			out = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")  # strict, as in most UTF-8 locales
-			argv = ["helpers.py", "glob_files", json.dumps({"pattern": "*.yml", "path": d})]
+			argv = ["helpers.py", "list_directory", json.dumps({"path": d})]
 			with mock.patch.object(sys, "argv", argv), mock.patch.object(sys, "stdout", out):
 				helpers.main()
 			out.flush()
-		self.assertEqual(out.buffer.getvalue().decode(), f"{d}/n\\udcff.yml\n")
+		self.assertEqual(out.buffer.getvalue().decode(), "n\\udcff/\n")
 
-	def test_search_options_reach_rg_and_grep(self):
+	def test_search_options_reach_rg(self):
 		def run(argv, **kw):
 			p = subprocess.run(argv, capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL, timeout=30,
 				env={"PATH": os.environ["PATH"], "LANG": "C.UTF-8"})  # like the sandbox's --clearenv
@@ -890,20 +846,15 @@ class GlobFallbackTest(unittest.TestCase):
 			Path(d, ".github", "ci.yml").write_text("--verbose\n")
 			Path(d, ".git").mkdir()
 			Path(d, ".git", "notes.yml").write_text("--verbose\n")
-			Path(d, os.fsdecode(b"n\xff.yml")).write_text("")
-			for rg in ([shutil.which("rg")] if shutil.which("rg") else []) + [None]:
-				with self.subTest(rg=rg):
-					with mock.patch.object(tools.shutil, "which", return_value=rg):
-						t = tools.Tools(mock.Mock())
-					t.sandbox.run.side_effect = run
-					glob = t.call("glob", json.dumps({"pattern": "*.yml", "path": d}))
-					self.assertIn(f"{d}/.github/ci.yml", glob.text)
-					self.assertNotIn(".git/", glob.text)
-					self.assertFalse(glob.error, glob.text)
-					grep = t.call("grep_search", json.dumps({"pattern": "--verbose", "path": d, "context": 10**30}))
-					self.assertEqual(grep.text, f"{d}/.github/ci.yml:1:--verbose")
-					self.assertEqual(t.call("grep_search", json.dumps({"pattern": "absent", "path": d})).text, "No matches.")
-					self.assertTrue(t.call("grep_search", json.dumps({"pattern": "(", "path": d})).error)
+			t = tools.Tools(mock.Mock())
+			t.sandbox.run.side_effect = run
+			glob = t.call("glob", json.dumps({"pattern": "*.yml", "path": d}))
+			self.assertEqual(glob.text, f"{d}/.github/ci.yml")
+			self.assertFalse(glob.error, glob.text)
+			grep = t.call("grep_search", json.dumps({"pattern": "--verbose", "path": d, "context": 10**30}))
+			self.assertEqual(grep.text, f"{d}/.github/ci.yml:1:--verbose")
+			self.assertEqual(t.call("grep_search", json.dumps({"pattern": "absent", "path": d})).text, "No matches.")
+			self.assertTrue(t.call("grep_search", json.dumps({"pattern": "(", "path": d})).error)
 
 	def test_a_timed_out_search_keeps_what_it_found(self):
 		def run(argv, timeout=None, **kw):
@@ -920,8 +871,6 @@ class GlobFallbackTest(unittest.TestCase):
 			# A search that finds a match and then stalls, as on a slow mount or a blocking file.
 			Path(d, "a.txt").write_text("needle\n")
 			Path(d, "b.txt").write_text("needle\n")
-			fifo = os.path.join(bin_dir, "fifo")
-			os.mkfifo(fifo)
 			slow = Path(bin_dir, "slow")
 			slow.write_text('#!/bin/bash\ncase "$1" in *b.txt) sleep 30;; esac; cat\n')
 			stub = Path(bin_dir, "rg")
@@ -931,14 +880,10 @@ class GlobFallbackTest(unittest.TestCase):
 			Path(listed, "a.txt").write_text("")
 			Path(listed, "z").mkdir()
 			os.mkfifo(Path(listed, "z", ".ignore"))
-			stall = Path(bin_dir, "grep")
-			stall.write_text(f'#!/bin/bash\nexec {shutil.which("grep")} "$@" {fifo}\n')  # blocks opening the FIFO
-			for script in (slow, stub, stall):
+			for script in (slow, stub):
 				script.chmod(0o755)
-			cases = [(None, "grep_search", {"pattern": "needle", "path": d}, f"{d}/a.txt:1:needle")]
-			if shutil.which("rg"):
-				cases += [(str(stub), "grep_search", {"pattern": "needle", "path": d}, f"{d}/a.txt:1:needle"),
-					(shutil.which("rg"), "glob", {"pattern": "*.txt", "path": str(listed)}, f"{listed}/a.txt")]
+			cases = [(str(stub), "grep_search", {"pattern": "needle", "path": d}, f"{d}/a.txt:1:needle"),
+				(shutil.which("rg"), "glob", {"pattern": "*.txt", "path": str(listed)}, f"{listed}/a.txt")]
 			for rg, tool, args, expected in cases:
 				with self.subTest(rg=rg, tool=tool), mock.patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"}):
 					with mock.patch.object(tools.shutil, "which", return_value=rg):
@@ -946,96 +891,11 @@ class GlobFallbackTest(unittest.TestCase):
 					t.sandbox.run.side_effect = run
 					self.assertIn(expected, t.call(tool, json.dumps(args)).text)
 
-	def test_grep_fallback_expands_braces_in_include(self):
-		with mock.patch.object(tools.shutil, "which", return_value=None):
-			t = tools.Tools(mock.Mock())
-		t.sandbox.run.side_effect = lambda argv, **kw: Result(
-			output=subprocess.run(argv, capture_output=True, text=True).stdout, exit_code=0)
-		with tempfile.TemporaryDirectory() as d:
-			for name in ("a.ts", "b.tsx", "c.js"):
-				Path(d, name).write_text("needle\n")
-			Path(d, "sub").mkdir()
-			Path(d, "sub", "d.ts").write_text("needle\n")
-			out = t.call("grep_search", json.dumps({"pattern": "needle", "path": d, "include": "**/*.{ts,tsx,txt}"})).text
-			bad = t.call("grep_search", json.dumps({"pattern": "needle", "path": d, "include": "sub/*.ts"}))
-			tsx = t.call("grep_search", json.dumps({"pattern": "needle", "path": d, "include": "*.ts{,x}"})).text
-			ts = t.call("grep_search", json.dumps({"pattern": "needle", "path": d, "include": "*.ts{}"})).text
-		self.assertEqual(sorted(line.split(":")[0] for line in out.splitlines()), [f"{d}/a.ts", f"{d}/b.tsx", f"{d}/sub/d.ts"])
-		self.assertTrue(bad.error, bad.text)
-		self.assertEqual(tsx, f"{d}/b.tsx:1:needle")
-		self.assertEqual(sorted(ts.splitlines()), [f"{d}/a.ts:1:needle", f"{d}/sub/d.ts:1:needle"])
-
-	def test_grep_fallback_limits_brace_expansion(self):
-		with mock.patch.object(tools.shutil, "which", return_value=None):
-			t = tools.Tools(mock.Mock())
-		t.sandbox.run.return_value = Result(output="", exit_code=1)
-		for include in ("{a,b}" * 12, "{" + ",".join("a" * 300) + "}", "*.{ts,t{sx,xt}}", "*.{ts", "{" * 2000):
-			with self.subTest(include=include[:20]):
-				result = t.call("grep_search", json.dumps({"pattern": "x", "include": include}))
-				self.assertTrue(result.error)
-				self.assertIn("Failed to expand braces", result.text)
-		t.sandbox.run.assert_not_called()
-		too_long = t.call("grep_search", json.dumps({"pattern": "x", "include": "{a}" * 50000}))
-		self.assertIn("over 1024", too_long.text)
-		t.call("grep_search", json.dumps({"pattern": "x", "include": "{a,b}" * 8 + "{c}" * 160}))
-		self.assertEqual(sum(a.startswith("--include=") for a in t.sandbox.run.call_args[0][0]), 256)
-
-	def test_brace_expansion_stops_before_building_too_many_patterns(self):
-		with mock.patch.object(helpers.itertools, "product") as product:
-			with self.assertRaisesRegex(ValueError, "more than 256"):
-				helpers.expand_braces("{a,b}" * 200)
-		product.assert_not_called()
-
-	def test_grep_fallback_reports_lines_that_are_not_utf8(self):
-		with mock.patch.object(tools.shutil, "which", return_value=None):
-			t = tools.Tools(mock.Mock())
-		t.sandbox.run.side_effect = lambda argv, **kw: Result(output=subprocess.run(argv, stdout=subprocess.PIPE,
-			stderr=subprocess.STDOUT, env={**os.environ, "LANG": "C.UTF-8", "LC_ALL": ""}).stdout.decode(errors="replace"),
-			exit_code=0)
-		with tempfile.TemporaryDirectory() as d:
-			Path(d, "a.txt").write_bytes(b"needle one\nneedle \xe9 two\nneedle three\n")
-			Path(d, "b.bin").write_bytes(b"needle\0\n")
-			out = t.call("grep_search", json.dumps({"pattern": "needle", "path": d})).text
-		self.assertIn(f"{d}/a.txt:1:needle one\n{d}/a.txt:3:needle three", out)
-		self.assertIn(f"{d}/a.txt: binary file matches", out)
-
-	def test_grep_fallback_searches_a_git_directory_by_name(self):
-		with mock.patch.object(tools.shutil, "which", return_value=None):
-			t = tools.Tools(mock.Mock())
-		t.sandbox.run.side_effect = lambda argv, **kw: Result(
-			output=subprocess.run(argv, capture_output=True, text=True).stdout, exit_code=0)
-		with tempfile.TemporaryDirectory() as d:
-			Path(d, ".git").mkdir()
-			Path(d, ".git", "config").write_text("needle\n")
-			out = t.call("grep_search", json.dumps({"pattern": "needle", "path": f"{d}/.git"})).text
-			Path(d, "worktree").mkdir()
-			Path(d, "worktree", ".git").write_text("gitdir: needle\n")
-			worktree = t.call("grep_search", json.dumps({"pattern": "needle", "path": f"{d}/worktree/.git"})).text
-			Path(d, "a.txt").write_text("needle\n")
-			everything = t.call("grep_search", json.dumps({"pattern": "needle", "path": d})).text
-		self.assertEqual(out, f"{d}/.git/config:1:needle")
-		self.assertEqual(worktree, f"{d}/worktree/.git:1:gitdir: needle")
-		self.assertEqual(everything, f"{d}/a.txt:1:needle")
-
-	def test_grep_fallback_rejects_a_newline_in_the_pattern(self):
-		with mock.patch.object(tools.shutil, "which", return_value=None):
-			t = tools.Tools(mock.Mock())
-		result = t.call("grep_search", json.dumps({"pattern": "needle ok\n"}))
-		self.assertTrue(result.error)
-		self.assertIn("contains a newline", result.text)
-		t.sandbox.run.assert_not_called()
-
 	def test_schemas_say_rg_globs_find_ignored_files(self):
 		from artifice.tools import schemas
-		glob, grep = (s["function"]["description"] for s in schemas(True) if s["function"]["name"] in ("glob", "grep_search"))
+		glob, grep = (s["function"]["description"] for s in schemas() if s["function"]["name"] in ("glob", "grep_search"))
 		self.assertIn("a matching pattern can include some; set include_ignored to list them all", glob)
 		self.assertIn("a matching include glob can include some; set include_ignored to search them all", grep)
-
-	def test_schemas_without_rg_do_not_offer_gitignore(self):
-		from artifice.tools import schemas
-		text = str(schemas(False))
-		self.assertNotIn("gitignore", text)
-		self.assertNotIn("ripgrep", text)
 
 
 class ReadFileTest(unittest.TestCase):
@@ -1136,15 +996,14 @@ class StoreTest(TempDataTest):
 		self.assertEqual(chat.path.parent.parent.stat().st_mode & 0o777, 0o700)
 
 
-class DepsTest(TempDataTest):
-	def test_failed_install_is_not_asked_again(self):
-		state = Path(self.data.name) / "state.json"
+class DepsTest(unittest.TestCase):
+	def test_rg_is_required(self):
 		which = lambda command: None if command == "rg" else f"/usr/bin/{command}"
-		with mock.patch.object(deps.shutil, "which", which), mock.patch.object(deps, "_ask", return_value=True), \
-				mock.patch.object(deps.subprocess, "run") as run, mock.patch.object(deps.sys, "stderr"):
-			self.assertTrue(deps.ensure(state))
-			self.assertTrue(deps.ensure(state))
-		self.assertEqual(run.call_count, 1)
+		with mock.patch.object(deps.shutil, "which", which), mock.patch.object(deps, "_manager", return_value="dnf"), \
+				mock.patch.object(deps, "_ask", return_value=True), mock.patch.object(deps.subprocess, "run") as run, \
+				mock.patch.object(deps.sys, "stderr"):
+			self.assertFalse(deps.ensure())
+		self.assertIn("ripgrep", run.call_args[0][0])
 
 
 class TerminalUITest(unittest.TestCase):

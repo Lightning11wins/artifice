@@ -128,7 +128,6 @@ def parse_args() -> argparse.Namespace:
 	p.add_argument("--max-tokens", type=int, default=16384, help="per-response limit, thinking included")
 	p.add_argument("--temperature", type=_positive, default=0.6, help="greater than 0")
 	p.add_argument("--top-p", type=_probability, default=0.95, help="greater than 0, at most 1")
-	p.add_argument("--check-deps", action="store_true", help="ask again about optional tools you declined")
 	return p.parse_args()
 
 
@@ -368,8 +367,8 @@ def main() -> None:
 
 def _main() -> None:
 	args = parse_args()
-	if not deps.ensure(data_dir() / "state.json", recheck=args.check_deps):
-		sys.exit("Failed to start: bwrap is required to sandbox the model's tools.")
+	if not deps.ensure():
+		sys.exit("Failed to start: bwrap and rg are required.")
 	clean_scratch(scratch_root())
 	app = App(args)
 	try:

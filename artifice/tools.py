@@ -1,12 +1,11 @@
 """Tool schemas for the model and their implementations, all run through the sandbox."""
 import json
-import re
 import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from .helpers import expand_braces, strip_dot_slash
+from .helpers import strip_dot_slash
 from .sandbox import Result, Sandbox, SandboxError
 
 HELPERS = str(Path(__file__).with_name("helpers.py"))
@@ -44,12 +43,11 @@ def _schema(name: str, description: str, properties: dict, required: list[str]) 
 	}}
 
 
-def schemas(rg: bool) -> list[dict]:
-	"""Tool schemas. Without rg, the fallbacks do not read .gitignore and grep uses grep -E syntax."""
+def schemas() -> list[dict]:
 	ignored = "Mostly skips paths ignored by .gitignore, though a matching {} can include some; set include_ignored to {} them all."
 
 	def include_ignored(verb: str) -> dict:
-		return {"include_ignored": {"type": "boolean", "description": f"Also {verb} files ignored by .gitignore"}} if rg else {}
+		return {"include_ignored": {"type": "boolean", "description": f"Also {verb} files ignored by .gitignore"}}
 
 	return [
 		_schema("read_file",
@@ -67,7 +65,7 @@ def schemas(rg: bool) -> list[dict]:
 			[]),
 		_schema("glob",
 			"Find files by glob pattern, such as '**/*.py' or 'src/**/test_*.js'. "
-			+ ("Skips .git. " + ignored.format("pattern", "list") if rg else "Skips .git."),
+			"Skips .git. " + ignored.format("pattern", "list"),
 			{
 				"pattern": {"type": "string", "description": "Glob pattern, relative to path"},
 				"path": {"type": "string", "description": "Directory to search; defaults to the working directory"},
@@ -75,16 +73,12 @@ def schemas(rg: bool) -> list[dict]:
 			},
 			["pattern"]),
 		_schema("grep_search",
-			f"Search file contents with a regular expression ({'ripgrep' if rg else 'grep -E'} syntax). "
-			"Returns path:line:text matches. "
-			+ ("Skips .git and binary files. " + ignored.format("include glob", "search") if rg
-				else "Skips .git. For files with NUL bytes or invalid UTF-8, a 'binary file matches' line "
-				"can stand in for some or all matching lines."),
+			"Search file contents with a regular expression (ripgrep syntax). Returns path:line:text matches. "
+			"Skips .git and binary files. " + ignored.format("include glob", "search"),
 			{
 				"pattern": {"type": "string", "description": "Regular expression to search for"},
 				"path": {"type": "string", "description": "File or directory to search; defaults to the working directory"},
-				"include": {"type": "string", "description": "Only search files matching this glob, such as '*.py'"
-					if rg else "Only search files whose names match this glob, such as '*.py'"},
+				"include": {"type": "string", "description": "Only search files matching this glob, such as '*.py'"},
 				"ignore_case": {"type": "boolean", "description": "Case-insensitive search"},
 				"context": {"type": "integer", "description": "Lines of context to show around each match"},
 				**include_ignored("search"),
@@ -110,8 +104,8 @@ class ToolResult:
 class Tools:
 	def __init__(self, sandbox: Sandbox):
 		self.sandbox = sandbox
-		self.rg = shutil.which("rg")
-		self.schemas = schemas(self.rg is not None)
+		self.rg = shutil.which("rg") or "rg"  # deps.ensure installs it
+		self.schemas = schemas()
 
 	def call(self, name: str, arguments: str) -> ToolResult:
 		try:
@@ -156,13 +150,10 @@ class Tools:
 
 	def _glob(self, pattern: str, path: str = ".", include_ignored: bool = False) -> ToolResult:
 		path = path or "."
-		if self.rg:
-			# Later globs win in rg, so the .git exclusion goes last.
-			argv = [self.rg, "--files", "--line-buffered", "--hidden", "--sort", "path", "-g", strip_dot_slash(pattern), "-g", "!.git"]
-			if include_ignored:
-				argv.append("--no-ignore")
-		else:
-			return self._helper("glob_files", {"pattern": pattern, "path": path})
+		# Later globs win in rg, so the .git exclusion goes last.
+		argv = [self.rg, "--files", "--line-buffered", "--hidden", "--sort", "path", "-g", strip_dot_slash(pattern), "-g", "!.git"]
+		if include_ignored:
+			argv.append("--no-ignore")
 		r = self.sandbox.run(_rg_in(path, argv, strip_dot_slash(pattern)), timeout=60)
 		if r.exit_code == 1 and not r.output.strip():
 			return ToolResult("No files matched.")
@@ -172,35 +163,19 @@ class Tools:
 			context: int = 0, include_ignored: bool = False) -> ToolResult:
 		path = path or "."
 		include = strip_dot_slash(include or "")
-		if self.rg:
-			argv = [self.rg, "--line-buffered", "--line-number", "--with-filename", "--no-heading", "--color=never", "--hidden",
-				"--sort", "path", "--max-columns", "400", "--max-columns-preview"]
-			if include:
-				argv += ["-g", include]
-			argv += ["-g", "!.git"]
-			if include_ignored:
-				argv.append("--no-ignore")
-		else:
-			if "\n" in pattern:  # grep would split it into patterns, any of which matches
-				return ToolResult(f"Error: the pattern contains a newline, but grep matches one line at a time: {pattern!r}", True)
-			# grep reports files with NUL bytes or invalid UTF-8 as "binary file matches" in place of those lines.
-			argv = ["grep", "-rnHE", "--line-buffered"]
-			if include:
-				# grep's --include matches file names and has no braces.
-				names = [re.sub(r"^(\*\*/)+", "", p) for p in expand_braces(include)]
-				if any("/" in name for name in names):
-					return ToolResult(f"Error: include matches file names only without ripgrep: {include}", True)
-				argv += [f"--include={name}" for name in names]
-			# The last matching --include or --exclude wins, and the first decides files that match none.
-			# grep's --exclude-dir and --exclude also skip a .git named as the path. A .git file links a submodule or worktree.
-			if Path(path).name != ".git":
-				argv += ["--exclude-dir=.git", "--exclude=.git"]
+		argv = [self.rg, "--line-buffered", "--line-number", "--with-filename", "--no-heading", "--color=never", "--hidden",
+			"--sort", "path", "--max-columns", "400", "--max-columns-preview"]
+		if include:
+			argv += ["-g", include]
+		argv += ["-g", "!.git"]
+		if include_ignored:
+			argv.append("--no-ignore")
 		if ignore_case:
 			argv.append("-i")
 		if context:
-			argv += ["-C", str(min(int(context), 1000))]  # GNU grep spins forever near -C 2**63
+			argv += ["-C", str(min(int(context), 1000))]  # rg rejects a count past its integer type
 		argv += ["-e", pattern]
-		r = self.sandbox.run(_rg_in(path, argv, include) if self.rg else argv + ["--", path], timeout=120)
+		r = self.sandbox.run(_rg_in(path, argv, include), timeout=120)
 		if r.exit_code == 1 and not r.output.strip():
 			return ToolResult("No matches.")
 		return ToolResult(_format(r, show_exit=r.exit_code not in (0, 1)), r.exit_code not in (0, 1))
