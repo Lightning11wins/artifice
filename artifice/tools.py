@@ -46,8 +46,7 @@ def _schema(name: str, description: str, properties: dict, required: list[str]) 
 
 def schemas(rg: bool) -> list[dict]:
 	"""Tool schemas. Without rg, the fallbacks do not read .gitignore and grep uses grep -E syntax."""
-	# rg's -g globs override .gitignore, so only ignored directories stay skipped for files the glob matches.
-	ignored = "unless include_ignored is true"
+	ignored = "paths ignored by .gitignore unless include_ignored is true or the {} matches them"  # rg's -g overrides
 
 	def include_ignored(verb: str) -> dict:
 		return {"include_ignored": {"type": "boolean", "description": f"Also {verb} files ignored by .gitignore"}} if rg else {}
@@ -68,7 +67,8 @@ def schemas(rg: bool) -> list[dict]:
 			[]),
 		_schema("glob",
 			"Find files by glob pattern, such as '**/*.py' or 'src/**/test_*.js'. "
-			+ (f"Skips .git and directories ignored by .gitignore {ignored}." if rg else "Skips .git."),
+			+ (f"Skips .git and {ignored.format('pattern')}, as '**/*' matches every directory; "
+				"prefer specific patterns like '**/*.py'." if rg else "Skips .git."),
 			{
 				"pattern": {"type": "string", "description": "Glob pattern, relative to path"},
 				"path": {"type": "string", "description": "Directory to search; defaults to the working directory"},
@@ -78,9 +78,9 @@ def schemas(rg: bool) -> list[dict]:
 		_schema("grep_search",
 			f"Search file contents with a regular expression ({'ripgrep' if rg else 'grep -E'} syntax). "
 			"Returns path:line:text matches. "
-			+ (f"Skips .git, binary files, and files ignored by .gitignore {ignored}; "
-				"with include, ignored files it matches are searched unless in an ignored directory." if rg
-				else "Skips .git and binary files."),
+			+ (f"Skips .git, binary files, and {ignored.format('include glob')}." if rg
+				else "Skips .git. Binary files and files that are not UTF-8 show only valid matching lines "
+				"and a 'binary file matches' line."),
 			{
 				"pattern": {"type": "string", "description": "Regular expression to search for"},
 				"path": {"type": "string", "description": "File or directory to search; defaults to the working directory"},
@@ -182,8 +182,8 @@ class Tools:
 			if include_ignored:
 				argv.append("--no-ignore")
 		else:
-			# The C locale keeps lines that are not valid UTF-8, which grep treats as binary in UTF-8 locales.
-			argv = ["env", "LC_ALL=C", "grep", "-rnHE", "--line-buffered", "--binary-files=without-match", "--exclude-dir=.git"]
+			# grep reports files with NUL bytes or invalid UTF-8 as "binary file matches" in place of those lines.
+			argv = ["grep", "-rnHE", "--line-buffered", "--exclude-dir=.git"]
 			if include:
 				# grep's --include matches file names and has no braces.
 				names = [re.sub(r"^(\*\*/)+", "", p) for p in expand_braces(include)]

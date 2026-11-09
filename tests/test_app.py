@@ -887,22 +887,24 @@ class GlobFallbackTest(unittest.TestCase):
 				helpers.expand_braces("{a,b}" * 200)
 		product.assert_not_called()
 
-	def test_grep_fallback_keeps_lines_that_are_not_utf8(self):
+	def test_grep_fallback_reports_lines_that_are_not_utf8(self):
 		with mock.patch.object(tools.shutil, "which", return_value=None):
 			t = tools.Tools(mock.Mock())
-		t.sandbox.run.side_effect = lambda argv, **kw: Result(output=subprocess.run(argv, capture_output=True,
-			env={**os.environ, "LANG": "C.UTF-8", "LC_ALL": ""}).stdout.decode(errors="replace"), exit_code=0)
+		t.sandbox.run.side_effect = lambda argv, **kw: Result(output=subprocess.run(argv, stdout=subprocess.PIPE,
+			stderr=subprocess.STDOUT, env={**os.environ, "LANG": "C.UTF-8", "LC_ALL": ""}).stdout.decode(errors="replace"),
+			exit_code=0)
 		with tempfile.TemporaryDirectory() as d:
 			Path(d, "a.txt").write_bytes(b"needle one\nneedle \xe9 two\nneedle three\n")
 			Path(d, "b.bin").write_bytes(b"needle\0\n")
 			out = t.call("grep_search", json.dumps({"pattern": "needle", "path": d})).text
-		self.assertEqual([line.split(":")[1] for line in out.splitlines()], ["1", "2", "3"])
+		self.assertIn(f"{d}/a.txt:1:needle one\n{d}/a.txt:3:needle three", out)
+		self.assertIn(f"{d}/a.txt: binary file matches", out)
 
 	def test_schemas_say_rg_globs_find_ignored_files(self):
 		from artifice.tools import schemas
 		glob, grep = (s["function"]["description"] for s in schemas(True) if s["function"]["name"] in ("glob", "grep_search"))
-		self.assertIn("directories ignored by .gitignore", glob)
-		self.assertIn("with include, ignored files it matches are searched", grep)
+		self.assertIn("unless include_ignored is true or the pattern matches them, as '**/*'", glob)
+		self.assertIn("unless include_ignored is true or the include glob matches them", grep)
 
 	def test_schemas_without_rg_do_not_offer_gitignore(self):
 		from artifice.tools import schemas
