@@ -181,6 +181,8 @@ class Tools:
 			if include_ignored:
 				argv.append("--no-ignore")
 		else:
+			if "\n" in pattern:  # grep would split it into patterns, any of which matches
+				return ToolResult(f"Error: the pattern contains a newline, but grep matches one line at a time: {pattern!r}", True)
 			# grep reports files with NUL bytes or invalid UTF-8 as "binary file matches" in place of those lines.
 			argv = ["grep", "-rnHE", "--line-buffered", "--exclude-dir=.git"]
 			if include:

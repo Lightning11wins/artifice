@@ -900,6 +900,14 @@ class GlobFallbackTest(unittest.TestCase):
 		self.assertIn(f"{d}/a.txt:1:needle one\n{d}/a.txt:3:needle three", out)
 		self.assertIn(f"{d}/a.txt: binary file matches", out)
 
+	def test_grep_fallback_rejects_a_newline_in_the_pattern(self):
+		with mock.patch.object(tools.shutil, "which", return_value=None):
+			t = tools.Tools(mock.Mock())
+		result = t.call("grep_search", json.dumps({"pattern": "needle ok\n"}))
+		self.assertTrue(result.error)
+		self.assertIn("contains a newline", result.text)
+		t.sandbox.run.assert_not_called()
+
 	def test_schemas_say_rg_globs_find_ignored_files(self):
 		from artifice.tools import schemas
 		glob, grep = (s["function"]["description"] for s in schemas(True) if s["function"]["name"] in ("glob", "grep_search"))
