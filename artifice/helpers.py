@@ -128,10 +128,11 @@ def _glob_body(pattern: str) -> str:
 	out = []
 	i = 0
 	while i < len(pattern):
-		if pattern.startswith("**/", i):
+		whole = i == 0 or pattern[i - 1] == "/"  # ** spans directories only as a whole path component, as in rg
+		if whole and pattern.startswith("**/", i):
 			out.append("(?:.*/)?")
 			i += 3
-		elif pattern.startswith("**", i):
+		elif whole and pattern[i:] == "**":
 			out.append(".*")
 			i += 2
 		elif pattern[i] == "*":

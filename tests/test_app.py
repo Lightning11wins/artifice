@@ -760,6 +760,9 @@ class GlobFallbackTest(unittest.TestCase):
 				helpers.glob_files("*.py", os.path.join(root, "missing"))
 			self.assertEqual(names("./tests/*.py"), ["tests/b.py"])
 			self.assertEqual(names("/tests/*.py"), ["tests/b.py"])
+			self.assertEqual(names("tests/**.py"), ["tests/b.py"])
+			self.assertEqual(helpers.glob_files("t**/c.py", root), "No files matched.")
+			self.assertEqual(names("tests/**"), ["tests/b.py", "tests/deep/c.py", "tests/f.txt"])
 			(Path(root) / "tests" / "loop").symlink_to("..")
 			self.assertEqual(names("**/b.py"), ["tests/b.py"])
 
