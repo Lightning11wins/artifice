@@ -263,7 +263,7 @@ class AgentTest(TempDataTest):
 					context_length=16384)
 				agent.send("hi")
 				self.assertEqual(agent.messages[-1]["content"], "done")
-				self.assertEqual(agent.client.summaries, 1)
+				self.assertNotIn(earlier, [m["content"] for m in agent.messages])
 				self.assertIn("hi", [m["content"] for m in agent.messages])
 
 	def test_replacing_a_summary_does_not_loop(self):
@@ -327,6 +327,24 @@ class AgentTest(TempDataTest):
 		agent = Agent(client, self.chat(), FakeTools(output="ok"), Settings(model="m"), QuietUI(), context_length=16384)
 		agent.send("go")
 		self.assertEqual(agent.messages[-1]["content"], "done")
+		self.assertGreater(client.max_tokens[-1], 256)
+
+	def test_only_the_long_tool_call_arguments_are_replaced(self):
+		chat = self.chat(("user", "write it"))
+		chat.messages += [
+			{"role": "assistant", "content": "", "tool_calls": [
+				{"id": "w", "type": "function", "function": {"name": "run_shell_command",
+					"arguments": json.dumps({"command": "x" * 80000})}},
+				{"id": "r", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "a"}'}}]},
+			{"role": "tool", "tool_call_id": "w", "content": "ok"},
+			{"role": "tool", "tool_call_id": "r", "content": "ok"},
+			{"role": "user", "content": "hi"},
+		]
+		agent = Agent(OverflowClient(limit=16000), chat, FakeTools(), Settings(model="m"), QuietUI(), context_length=16384)
+		agent._loop()
+		self.assertEqual(agent.messages[-1]["content"], "done")
+		self.assertIn("Removed", agent.messages[2]["tool_calls"][0]["function"]["arguments"])
+		self.assertEqual(agent.messages[2]["tool_calls"][1]["function"]["arguments"], '{"path": "a"}')
 
 	def test_reasoning_the_server_no_longer_sees_is_not_replaced(self):
 		chat = self.chat(("user", "earlier"))

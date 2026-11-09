@@ -109,6 +109,7 @@ class Agent:
 					if not self._replace_largest(e) or self._history_bytes() >= overflowed_at:
 						raise
 					size = self._history_bytes()
+					self.usage_tokens = None  # count the shrunk history again, at the lowered bytes_per_token
 				overflowed_at = size
 				self.ui.notice("The conversation is over the context limit. Compacting.")
 				continue
