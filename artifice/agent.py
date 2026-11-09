@@ -118,7 +118,10 @@ class Agent:
 				continue
 			overflowed_at, replaced_at = None, float("inf")
 			self.messages.append(message)
-			self.chat.save()
+			try:
+				self.chat.save()
+			finally:  # after the save, so a reply is kept even if the reader of stdout is gone
+				self.ui.end_stream(tool_calls=bool(message.get("tool_calls")))
 			if stop_reason == "length":
 				self.ui.notice(f"Response hit max_tokens ({max_tokens}) and was cut off.")
 			calls = message.get("tool_calls") or []
@@ -222,9 +225,10 @@ class Agent:
 						self.usage_tokens = usage["prompt_tokens"] + (usage.get("completion_tokens") or 0)
 						self.usage_n = len(self.messages) + 1  # counts the reply about to be appended
 					self.context_length = usage.get("context_length") or self.context_length
-		finally:
+		except BaseException:
 			if display:
 				self.ui.end_stream(tool_calls=bool(tool_calls))
+			raise
 
 		message: dict = {"role": "assistant", "content": "".join(content)}
 		if reasoning:

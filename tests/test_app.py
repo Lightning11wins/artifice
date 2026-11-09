@@ -306,6 +306,18 @@ class AgentTest(TempDataTest):
 		with self.assertRaisesRegex(LLMError, "context size"):
 			agent.send("1" * 15800)
 
+	def test_the_reply_is_saved_when_stdout_is_closed(self):
+		class ClosedPipe(io.StringIO):
+			def write(self, text):
+				raise BrokenPipeError
+
+		chat = self.chat()
+		ui = cli.TerminalUI(answer_out=ClosedPipe(), trace_out=io.StringIO())
+		agent = Agent(FakeClient(), chat, FakeTools(), Settings(model="m"), ui, context_length=32768)
+		with self.assertRaises(BrokenPipeError):
+			agent.send("hi")
+		self.assertEqual(Chat.load(chat.id).messages[-1]["role"], "assistant")
+
 	def test_undecodable_text_is_counted(self):
 		chat = self.chat()
 		chat.messages[0]["content"] += os.fsdecode(b" in /caf\xe9")
