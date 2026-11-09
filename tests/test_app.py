@@ -681,6 +681,20 @@ class ToolsTest(unittest.TestCase):
 		with mock.patch.object(tools.json, "dumps", side_effect=RecursionError):
 			self.assertEqual(tools.describe_call("read_file", '{"path": [[]]}'), 'read_file({"path": [[]]})')
 
+	def test_sandbox_failures_are_tool_errors(self):
+		t = tools.Tools(mock.Mock())
+		t.sandbox.run.side_effect = SandboxError("Failed to authenticate with sudo.")
+		result = t.call("run_shell_command", json.dumps({"command": "ls"}))
+		self.assertEqual((result.text, result.error), ("Error: Failed to authenticate with sudo.", True))
+
+	def test_a_full_scratch_is_reported(self):
+		t = tools.Tools(mock.Mock())
+		t.sandbox.scratch_usage.return_value = (0, 0)
+		for exit_code, notice in ((None, f"[Killed: {tools.SCRATCH_FULL}]"), (0, "Commands are killed after a second")):
+			with self.subTest(exit_code=exit_code):
+				t.sandbox.run.return_value = Result(output="", exit_code=exit_code, scratch_full=True)
+				self.assertIn(notice, t.call("run_shell_command", json.dumps({"command": "x"})).text)
+
 	def test_nul_in_arguments_is_an_error(self):
 		t = tools.Tools(mock.Mock())
 		for name, args in (("read_file", {"path": "a\0b"}), ("run_shell_command", {"command": "echo a\0b"})):
