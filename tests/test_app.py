@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -752,6 +753,20 @@ class ToolsTest(unittest.TestCase):
 				self.assertTrue(result.error)
 				self.assertIn("path must be a string", result.text)
 
+	def test_bad_tool_calls_are_errors_before_the_sandbox(self):
+		t = tools.Tools(mock.Mock())
+		for name, arguments, text in (
+				("read_file", "[1]", "not a valid JSON object"),
+				("helper", json.dumps({"tool": "read_file", "args": {"path": "/x"}}), "unknown tool helper"),
+				("rg_in", "{}", "unknown tool rg_in"),
+				("read_file", '{"path": "/x", "bogus": 1}', "bad arguments"),
+				("read_file", '{"path": "/x", "offset": 1e400}', "bad arguments")):
+			with self.subTest(name=name, arguments=arguments):
+				result = t.call(name, arguments)
+				self.assertTrue(result.error)
+				self.assertIn(text, result.text)
+		t.sandbox.run.assert_not_called()
+
 	def test_deeply_nested_arguments_are_an_error(self):
 		arguments = "[" * 20000
 		self.assertEqual(tools.describe_call("read_file", arguments), f"read_file({arguments})")
@@ -1031,6 +1046,18 @@ class ReadFileTest(unittest.TestCase):
 			f.write(b"p 10%\rp 100%\nERROR\r\n")
 			f.flush()
 			self.assertIn("     2\tERROR\n", helpers.read_file(f.name) + "\n")
+
+	def test_a_fifo_is_refused_without_opening_it(self):
+		# Opening it would block, or take data meant for another reader.
+		with tempfile.TemporaryDirectory() as d:
+			fifo = os.path.join(d, "f")
+			os.mkfifo(fifo)
+			result = []
+			reader = threading.Thread(target=lambda: result.append(helpers.read_file(fifo)), daemon=True)
+			reader.start()
+			reader.join(5)
+			self.assertEqual(len(result), 1, "read_file blocked on the FIFO")
+			self.assertIn("not a regular file (FIFO)", result[0])
 
 	def test_output_fits_the_tool_cap_with_whole_lines(self):
 		with tempfile.NamedTemporaryFile("w") as f:
