@@ -855,9 +855,17 @@ class GlobFallbackTest(unittest.TestCase):
 			self.assertIn(f"{path}:1:needle", t.call("grep_search", json.dumps(grep)).text)
 
 	def test_search_options_reach_rg_and_grep(self):
+		# Python escapes undecodable output in C.UTF-8, so the helpers' backslashreplace shows only in another locale.
+		try:
+			locales = subprocess.run(["locale", "-a"], capture_output=True, text=True).stdout.split()
+		except OSError:
+			locales = []
+		lang = next((name for name in locales if name.lower().endswith((".utf8", ".utf-8")) and not name.startswith("C.")),
+			"C.UTF-8")
+
 		def run(argv, **kw):
-			p = subprocess.run(argv, capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL,
-				env={**os.environ, "LC_ALL": "en_US.UTF-8"})  # not C.UTF-8, where Python escapes undecodable bytes
+			p = subprocess.run(argv, capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL, timeout=30,
+				env={"PATH": os.environ["PATH"], "LC_ALL": lang})
 			return Result(output=p.stdout + p.stderr, exit_code=p.returncode)
 
 		with tempfile.TemporaryDirectory() as d:
