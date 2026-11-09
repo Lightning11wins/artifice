@@ -886,6 +886,29 @@ class SearchTest(unittest.TestCase):
 			self.assertIn(f"{path}:1:needle", t.call("grep_search", json.dumps({**grep, "include": "*.txt"})).text)
 			self.assertIn(f"{path}:1:needle", t.call("grep_search", json.dumps(grep)).text)
 
+	def test_a_path_that_is_not_a_regular_file_or_is_a_dash(self):
+		with tempfile.TemporaryDirectory() as d:
+			def run(argv, **kw):
+				p = subprocess.run(argv, capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL, timeout=30,
+					cwd=d, env={"PATH": os.environ["PATH"], "LANG": "C.UTF-8"})
+				return Result(output=p.stdout + p.stderr, exit_code=p.returncode)
+
+			t = tools.Tools(mock.Mock())
+			t.sandbox.run.side_effect = run
+			os.mkfifo(Path(d, "data.log"))  # opening it would block with no writer
+			for path in ("data.log", "/dev/null"):
+				with self.subTest(path=path):
+					grep = t.call("grep_search", json.dumps({"pattern": "x", "path": path, "include": "*.py"}))
+					self.assertEqual(grep.text, "No matches.")
+					self.assertEqual(t.call("glob", json.dumps({"pattern": "*.py", "path": path})).text, "No files matched.")
+			Path(d, "-").write_text("needle\n")
+			self.assertEqual(t.call("grep_search", json.dumps({"pattern": "needle", "path": "-"})).text, "./-:1:needle")
+			os.remove(Path(d, "-"))
+			Path(d, "-").mkdir()
+			Path(d, "-", "a.txt").write_text("needle\n")
+			self.assertEqual(t.call("glob", json.dumps({"pattern": "*.txt", "path": "-"})).text, "-/a.txt")
+			self.assertEqual(t.call("grep_search", json.dumps({"pattern": "needle", "path": "-"})).text, "-/a.txt:1:needle")
+
 	@unittest.skipUnless(sys.getfilesystemencoding() == "utf-8", "file names decode to surrogates only from UTF-8")
 	def test_helpers_print_undecodable_names(self):
 		with tempfile.TemporaryDirectory() as d:
