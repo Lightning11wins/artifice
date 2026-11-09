@@ -912,7 +912,11 @@ class GlobFallbackTest(unittest.TestCase):
 			Path(d, ".git").mkdir()
 			Path(d, ".git", "config").write_text("needle\n")
 			out = t.call("grep_search", json.dumps({"pattern": "needle", "path": f"{d}/.git"})).text
+			Path(d, "worktree").mkdir()
+			Path(d, "worktree", ".git").write_text("gitdir: needle\n")
+			worktree = t.call("grep_search", json.dumps({"pattern": "needle", "path": f"{d}/worktree/.git"})).text
 		self.assertEqual(out, f"{d}/.git/config:1:needle")
+		self.assertEqual(worktree, f"{d}/worktree/.git:1:gitdir: needle")
 
 	def test_grep_fallback_rejects_a_newline_in_the_pattern(self):
 		with mock.patch.object(tools.shutil, "which", return_value=None):

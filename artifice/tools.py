@@ -184,7 +184,8 @@ class Tools:
 			if "\n" in pattern:  # grep would split it into patterns, any of which matches
 				return ToolResult(f"Error: the pattern contains a newline, but grep matches one line at a time: {pattern!r}", True)
 			# grep reports files with NUL bytes or invalid UTF-8 as "binary file matches" in place of those lines.
-			argv = ["grep", "-rnHE", "--line-buffered", "--exclude-dir=.git"]
+			# grep's --exclude-dir=.git also skips a .git named as the path.
+			argv = ["grep", "-rnHE", "--line-buffered"] + (["--exclude-dir=.git"] if Path(path).name != ".git" else [])
 			if include:
 				# grep's --include matches file names and has no braces.
 				names = [re.sub(r"^(\*\*/)+", "", p) for p in expand_braces(include)]
@@ -196,8 +197,6 @@ class Tools:
 		if context:
 			argv += ["-C", str(int(context))]
 		argv += ["-e", pattern]
-		if not self.rg and Path(path).name == ".git" and not path.endswith("/"):
-			path += "/"  # grep's --exclude-dir=.git also skips a .git named on the command line
 		r = self.sandbox.run(_rg_in(path, argv, include) if self.rg else argv + ["--", path], timeout=120)
 		if r.exit_code == 1 and not r.output.strip():
 			return ToolResult("No matches.")
