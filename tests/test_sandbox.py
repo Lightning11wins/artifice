@@ -23,6 +23,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import artifice.sandbox  # noqa: E402
+from artifice.launcher import systemd_running  # noqa: E402
 from artifice.sandbox import READ_ONLY, Profile, Result, Sandbox, SandboxError, clean_scratch  # noqa: E402
 
 # Host directory the sandbox can see but must not modify. Under $HOME, not /tmp, which the sandbox replaces.
@@ -591,16 +592,39 @@ print("result:", r.output.strip().splitlines()[-1])
 		self.assertIn("run this through sudo", r.stderr)
 
 	def test_launcher_refuses_a_scratch_only_root_can_reach(self):
-		# The scratch is writable in the sandbox, so a world-writable directory behind a root-only one must stay shut.
-		locked = HOST_DIR / f"locked-{os.getpid()}"
-		inner = locked / "inner"
-		subprocess.run(["sudo", "-n", "sh", "-c", f"mkdir -m 700 {locked} && mkdir -m 777 {inner}"], check=True)
-		self.addCleanup(subprocess.run, ["sudo", "-n", "rm", "-rf", str(locked)])
-		request = self.sb.request(["sh", "-c", "echo pwned > /tmp/f"], deadline=30) | {"scratch": str(inner)}
-		r = subprocess.run(["sudo", "-n", LAUNCHER], input=json.dumps(request), capture_output=True, text=True)
-		self.assertNotEqual(r.returncode, 0)
-		self.assertIn("Failed to open scratch directory", r.stderr)
-		self.assertNotEqual(subprocess.run(["sudo", "-n", "test", "-e", str(inner / "f")]).returncode, 0)
+		# The scratch is writable in the sandbox, so a world-writable directory behind a root-only one must stay shut,
+		# whether the scratch is that directory or a shared one above it.
+		shared = HOST_DIR / f"shared-{os.getpid()}"
+		inner = shared / "locked" / "inner"
+		subprocess.run(["sudo", "-n", "sh", "-c", f"mkdir -m 755 {shared} && mkdir -m 700 {inner.parent} && "
+			f"mkdir -m 777 {inner}"], check=True)
+		self.addCleanup(subprocess.run, ["sudo", "-n", "rm", "-rf", str(shared)])
+		for scratch, write in ((inner, "/tmp/f"), (shared, "/tmp/locked/inner/f")):
+			with self.subTest(scratch=scratch):
+				request = self.sb.request(["sh", "-c", f"echo pwned > {write}"], deadline=30) | {"scratch": str(scratch)}
+				r = subprocess.run(["sudo", "-n", LAUNCHER], input=json.dumps(request), capture_output=True, text=True)
+				self.assertNotEqual(r.returncode, 0)
+				self.assertIn("Failed to open scratch directory", r.stderr)
+				self.assertNotEqual(subprocess.run(["sudo", "-n", "test", "-e", str(inner / "f")]).returncode, 0)
+
+	@unittest.skipUnless(systemd_running(), "needs systemd")
+	def test_commands_run_in_the_users_slice(self):
+		# The launcher runs systemd-run as root, so the scope must still count against the user's own limits.
+		marker = f"{os.getpid()}.25"
+		done = threading.Thread(target=self.sb.run, args=(["sleep", marker],))
+		done.start()
+		try:
+			for _ in range(100):
+				pids = subprocess.run(["pgrep", "-fx", f"sleep {marker}"], capture_output=True, text=True).stdout.split()
+				if pids:
+					break
+				time.sleep(0.1)
+			self.assertEqual(len(pids), 1)
+			cgroup = Path(f"/proc/{pids[0]}/cgroup").read_text()
+		finally:
+			subprocess.run(["sudo", "-n", "pkill", "-fx", f"sleep {marker}"])
+			done.join()
+		self.assertIn(f"/user-{os.getuid()}.slice/", cgroup)
 
 	def test_the_command_inherits_only_stdio(self):
 		r = self.py("""

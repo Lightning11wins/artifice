@@ -3,7 +3,7 @@
 
 bin/install-sandbox installs a root-owned copy, with confine.py beside it, and lets the user run it with sudo
 and no password. So the request can only choose what the user could choose anyway: the command runs as the user,
-the scratch directory is opened as the user, and the limits only constrain the command.
+the scratch directory must be the user's, and the limits only constrain the command.
 
 The request is JSON on stdin, which keeps the command out of sudo's logs:
 {"argv": [...], "deadline": seconds, "scratch": dir, "cwd": dir, "lang": "C.UTF-8",
@@ -57,19 +57,26 @@ def read_request() -> dict:
 	return request
 
 
-def open_as_user(path: str, uid: int, gid: int, groups: list[int]) -> int:
-	"""Opens directory path with the user's permissions, so a path only root can reach fails."""
+def open_scratch(path: str, uid: int, gid: int, groups: list[int]) -> int:
+	"""Opens directory path with the user's permissions, so a path only root can reach fails.
+
+	The user must own it, so it cannot be a shared directory like /tmp, which can hold directories the user cannot enter.
+	The sandbox can enter those, and could write to world-writable directories inside them."""
 	os.setgroups(groups)
 	os.setegid(gid)
 	os.seteuid(uid)
 	try:
-		return os.open(path, os.O_PATH | os.O_DIRECTORY)
+		fd = os.open(path, os.O_PATH | os.O_DIRECTORY)
 	except OSError as e:
 		fail(f"Failed to open scratch directory {path}: {e.strerror}")
 	finally:
 		os.seteuid(0)
 		os.setegid(0)
 		os.setgroups([])
+	owner = os.fstat(fd).st_uid
+	if owner != uid:
+		fail(f"Failed to open scratch directory {path}: it belongs to uid {owner}, not {uid}")
+	return fd
 
 
 def main() -> None:
@@ -81,7 +88,7 @@ def main() -> None:
 	request = read_request()
 	user = pwd.getpwuid(uid)
 	groups = os.getgrouplist(user.pw_name, gid)
-	scratch = open_as_user(request["scratch"], uid, gid, groups)
+	scratch = open_scratch(request["scratch"], uid, gid, groups)
 	os.set_inheritable(scratch, True)
 
 	env = {
@@ -107,8 +114,9 @@ def main() -> None:
 		setpriv, "--pdeathsig", "KILL"]
 	if systemd_running():
 		# A system scope, because sudo's PAM session can move it out of a user scope.
+		# It goes in the user's slice, so the user's limits still apply.
 		cmd += [
-			which("systemd-run"), "--scope", "--quiet", "--collect",
+			which("systemd-run"), "--scope", "--quiet", "--collect", f"--slice=user-{uid}.slice",
 			"-p", f"MemoryMax={request['memory_max']}",
 			"-p", "MemorySwapMax=0",
 			"-p", f"TasksMax={request['tasks_max']}",
