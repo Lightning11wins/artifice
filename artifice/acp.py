@@ -139,11 +139,11 @@ class Server:
 				except (ValueError, RecursionError) as e:
 					self.send({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": f"Failed to parse message: {e}"}})
 					continue
-				if isinstance(message, dict) and ("result" in message or "error" in message):
+				if isinstance(message, dict) and "method" not in message and ("result" in message or "error" in message):
 					continue  # a response, and Artifice sends no requests
 				if not isinstance(message, dict) or not isinstance(message.get("method"), str):
 					request_id = message.get("id") if isinstance(message, dict) else None
-					self.send({"jsonrpc": "2.0", "id": request_id if isinstance(request_id, (str, int)) else None,
+					self.send({"jsonrpc": "2.0", "id": request_id if type(request_id) in (str, int) else None,
 						"error": {"code": INVALID_REQUEST, "message": f"Failed to read message: want a request, got {line!r:.200}"}})
 					continue
 				params = message.get("params") if isinstance(message.get("params"), dict) else {}

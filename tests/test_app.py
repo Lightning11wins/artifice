@@ -1315,12 +1315,16 @@ class AcpTest(TempDataTest):
 					self.assertEqual(bad["error"]["code"], -32602)
 			relative = client.request("session/new", {"cwd": "tests", "mcpServers": []})
 			self.assertEqual(relative["error"]["code"], -32602)
-			for message in ({"jsonrpc": "2.0", "id": 90, "method": 7}, [{"jsonrpc": "2.0", "id": 91, "method": "initialize"}]):
+			for message, request_id in (({"jsonrpc": "2.0", "id": 90, "method": 7}, 90),
+					({"jsonrpc": "2.0", "id": 91, "method": 7, "result": 1}, 91),
+					([{"jsonrpc": "2.0", "id": 92, "method": "initialize"}], None)):
 				with self.subTest(message=message):
 					client.writer.write(json.dumps(message) + "\n")
 					client.writer.flush()
-					reply = client.until(lambda m: "error" in m and m.get("id") in (90, None))
-					self.assertEqual(reply["error"]["code"], -32600)
+					start = len(client.received)
+					client.response(client.send("x/none", {}))  # the server answers in order, so this follows the reply
+					replies = [m for m in client.received[start:] if "error" in m and m.get("id") == request_id]
+					self.assertEqual([m["error"]["code"] for m in replies], [-32600])
 			self.client.list = lambda: [{}]  # a server bug
 			broken = client.request("session/set_config_option", {"sessionId": session, "configId": "model", "value": "m"})
 			self.assertEqual(broken["error"]["code"], -32603)
