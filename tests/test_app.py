@@ -1313,6 +1313,14 @@ class AcpTest(TempDataTest):
 				with self.subTest(block=block):
 					bad = client.request("session/prompt", {"sessionId": session, "prompt": [block]})
 					self.assertEqual(bad["error"]["code"], -32602)
+			relative = client.request("session/new", {"cwd": "tests", "mcpServers": []})
+			self.assertEqual(relative["error"]["code"], -32602)
+			for message in ({"jsonrpc": "2.0", "id": 90, "method": 7}, [{"jsonrpc": "2.0", "id": 91, "method": "initialize"}]):
+				with self.subTest(message=message):
+					client.writer.write(json.dumps(message) + "\n")
+					client.writer.flush()
+					reply = client.until(lambda m: "error" in m and m.get("id") in (90, None))
+					self.assertEqual(reply["error"]["code"], -32600)
 			self.client.list = lambda: [{}]  # a server bug
 			broken = client.request("session/set_config_option", {"sessionId": session, "configId": "model", "value": "m"})
 			self.assertEqual(broken["error"]["code"], -32603)

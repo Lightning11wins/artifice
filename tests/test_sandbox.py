@@ -592,20 +592,23 @@ print("result:", r.output.strip().splitlines()[-1])
 		self.assertIn("run this through sudo", r.stderr)
 
 	def test_launcher_refuses_a_scratch_only_root_can_reach(self):
-		# The scratch is writable in the sandbox, so a world-writable directory behind a root-only one must stay shut,
-		# whether the scratch is that directory or a shared one above it.
+		# The scratch is writable in the sandbox, so a directory behind a root-only one must stay shut,
+		# whether the scratch is that directory, even one the user owns, or a shared one above it.
 		shared = HOST_DIR / f"shared-{os.getpid()}"
 		inner = shared / "locked" / "inner"
 		subprocess.run(["sudo", "-n", "sh", "-c", f"mkdir -m 755 {shared} && mkdir -m 700 {inner.parent} && "
-			f"mkdir -m 777 {inner}"], check=True)
+			f"mkdir -m 777 {inner} && install -d -o {os.getuid()} {inner.parent / 'mine'}"],
+			check=True)
 		self.addCleanup(subprocess.run, ["sudo", "-n", "rm", "-rf", str(shared)])
-		for scratch, write in ((inner, "/tmp/f"), (shared, "/tmp/locked/inner/f")):
+		mine = inner.parent / "mine"
+		for scratch, write, written in ((inner, "/tmp/f", inner / "f"), (mine, "/tmp/f", mine / "f"),
+				(shared, "/tmp/locked/inner/f", inner / "f")):
 			with self.subTest(scratch=scratch):
 				request = self.sb.request(["sh", "-c", f"echo pwned > {write}"], deadline=30) | {"scratch": str(scratch)}
 				r = subprocess.run(["sudo", "-n", LAUNCHER], input=json.dumps(request), capture_output=True, text=True)
 				self.assertNotEqual(r.returncode, 0)
 				self.assertIn("Failed to open scratch directory", r.stderr)
-				self.assertNotEqual(subprocess.run(["sudo", "-n", "test", "-e", str(inner / "f")]).returncode, 0)
+				self.assertNotEqual(subprocess.run(["sudo", "-n", "test", "-e", str(written)]).returncode, 0)
 
 	@unittest.skipUnless(systemd_running(), "needs systemd")
 	def test_commands_run_in_the_users_slice(self):

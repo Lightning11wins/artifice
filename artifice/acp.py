@@ -139,8 +139,13 @@ class Server:
 				except (ValueError, RecursionError) as e:
 					self.send({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": f"Failed to parse message: {e}"}})
 					continue
-				if not isinstance(message, dict) or not isinstance(message.get("method"), str):
+				if isinstance(message, dict) and ("result" in message or "error" in message):
 					continue  # a response, and Artifice sends no requests
+				if not isinstance(message, dict) or not isinstance(message.get("method"), str):
+					request_id = message.get("id") if isinstance(message, dict) else None
+					self.send({"jsonrpc": "2.0", "id": request_id if isinstance(request_id, (str, int)) else None,
+						"error": {"code": INVALID_REQUEST, "message": f"Failed to read message: want a request, got {line!r:.200}"}})
+					continue
 				params = message.get("params") if isinstance(message.get("params"), dict) else {}
 				session_id = params.get("sessionId") if isinstance(params.get("sessionId"), str) else ""
 				if message["method"] == "session/cancel":
@@ -226,6 +231,8 @@ class Server:
 
 	def new_session(self, params: dict) -> dict:
 		cwd = _field(params, "cwd", str)
+		if not os.path.isabs(cwd):
+			raise RpcError(INVALID_PARAMS, f"Failed to start a session in {cwd!r}: want an absolute path")
 		app = App(argparse.Namespace(**vars(self.args)), AcpUI(self))
 		chat = app.new_chat(cwd)
 		app.open_chat(chat)
