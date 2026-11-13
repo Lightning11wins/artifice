@@ -10,6 +10,7 @@ import secrets
 import signal
 import sys
 import threading
+import traceback
 from queue import Queue
 from urllib.parse import unquote, urlparse
 
@@ -106,6 +107,7 @@ class Server:
 		self.queued: dict[str, int] = {}  # session id -> prompts received
 		self.cancelled: dict[str, int] = {}  # session id -> prompts received when it was last cancelled
 		self.running: tuple[str, int] | None = None  # the session and number of the prompt running now
+		self.interrupted = False  # whether the running prompt was interrupted, so cleanup is not interrupted again
 		self.initialized = False
 
 	def serve(self) -> None:
@@ -117,12 +119,12 @@ class Server:
 	def send(self, message: dict) -> None:
 		line = json.dumps(message) + "\n"
 		with self.write_lock:
-			mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})  # so a cancel cannot cut a message short
 			try:
+				signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})  # so a cancel cannot cut a message short
 				self.stdout.write(line)
 				self.stdout.flush()
 			finally:
-				signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+				signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGUSR1})
 
 	def notify(self, method: str, params: dict) -> None:
 		self.send({"jsonrpc": "2.0", "method": method, "params": params})
@@ -165,7 +167,8 @@ class Server:
 		return running is not None and running[1] <= self.cancelled.get(running[0], 0)
 
 	def _interrupt(self, signum, frame) -> None:
-		if self._cancelling():
+		if self._cancelling() and not self.interrupted:
+			self.interrupted = True
 			raise KeyboardInterrupt
 
 	def _handle(self, message: dict, number: int) -> None:
@@ -195,6 +198,12 @@ class Server:
 		except (LLMError, SandboxError, OSError, ValueError) as e:
 			if request_id is not None:
 				self.send({"jsonrpc": "2.0", "id": request_id, "error": {"code": INTERNAL_ERROR, "message": str(e)}})
+			return
+		except Exception as e:  # a bug fails one request, not every session
+			traceback.print_exc()
+			if request_id is not None:
+				self.send({"jsonrpc": "2.0", "id": request_id, "error": {"code": INTERNAL_ERROR,
+					"message": f"Failed to run {method}: {type(e).__name__}: {e}"}})
 			return
 		if request_id is not None:
 			self.send({"jsonrpc": "2.0", "id": request_id, "result": result})
@@ -261,7 +270,7 @@ class Server:
 		with self.lock:
 			if number <= self.cancelled.get(session_id, 0):
 				return {"stopReason": "cancelled"}
-			self.running = (session_id, number)
+			self.running, self.interrupted = (session_id, number), False
 		app.ui.in_turn = True
 		try:
 			try:
@@ -333,14 +342,14 @@ def _prompt_text(blocks: list) -> str:
 	for block in blocks:
 		kind = block.get("type") if isinstance(block, dict) else None
 		if kind == "text":
-			parts.append(block.get("text", ""))
+			parts.append(_field(block, "text", str))
 		elif kind == "resource_link":
-			parts.append(f"@{_path(block.get('uri', ''))}")
-		elif kind == "resource" and isinstance(block.get("resource"), dict):
-			resource = block["resource"]
-			path = _path(resource.get("uri", ""))
+			parts.append(f"@{_path(_field(block, 'uri', str))}")
+		elif kind == "resource":
+			resource = _field(block, "resource", dict)
+			path = _path(_field(resource, "uri", str))
 			if "text" in resource:
-				parts.append(f"\n\nContents of {path}:\n{_fenced(resource['text'])}\n")
+				parts.append(f"\n\nContents of {path}:\n{_fenced(_field(resource, 'text', str))}\n")
 			else:
 				parts.append(f"@{path}")
 		else:

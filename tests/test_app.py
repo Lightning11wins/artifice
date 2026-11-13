@@ -1305,6 +1305,31 @@ class AcpTest(TempDataTest):
 		self.serve(script)
 		self.assertEqual(self.client.loaded, ["m", "other"])
 
+	def test_bad_requests_fail_alone(self):
+		def script(client):
+			session = self.start(client)
+			for block in ({"type": "text", "text": 1}, {"type": "resource_link", "uri": 1, "name": "a"},
+					{"type": "resource", "resource": {"uri": "file:///a", "text": None}}, {"type": "image"}):
+				with self.subTest(block=block):
+					bad = client.request("session/prompt", {"sessionId": session, "prompt": [block]})
+					self.assertEqual(bad["error"]["code"], -32602)
+			self.client.list = lambda: [{}]  # a server bug
+			broken = client.request("session/set_config_option", {"sessionId": session, "configId": "model", "value": "m"})
+			self.assertEqual(broken["error"]["code"], -32603)
+			done = client.request("session/prompt", {"sessionId": session, "prompt": [{"type": "text", "text": "hi"}]})
+			self.assertEqual(done["result"], {"stopReason": "end_turn"})
+
+		with mock.patch.object(acp.traceback, "print_exc"):
+			self.serve(script)
+
+	def test_a_prompt_is_interrupted_once(self):
+		# A second cancel must not cut short the cleanup of the first, which saves the chat and stops the sandbox.
+		server = acp.Server(self.args, None, None)
+		server.running, server.cancelled["s"] = ("s", 1), 1
+		with self.assertRaises(KeyboardInterrupt):
+			server._interrupt(signal.SIGUSR1, None)
+		server._interrupt(signal.SIGUSR1, None)
+
 	def test_stdout_carries_only_the_protocol(self):
 		code = ("import sys; sys.path.insert(0, sys.argv[1]); from artifice import acp; "
 			"acp.Server.serve = lambda self: (print('stray'), self.notify('x', {})); acp.serve(None)")
