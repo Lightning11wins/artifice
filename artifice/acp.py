@@ -235,7 +235,7 @@ class Server:
 			raise RpcError(INVALID_PARAMS, f"Failed to start a session in {cwd!r}: want an absolute path")
 		app = App(argparse.Namespace(**vars(self.args)), AcpUI(self))
 		chat = app.new_chat(cwd)
-		app.open_chat(chat)
+		app.open_chat(chat, load=False)
 		app.ui.session_id = chat.id
 		self.apps[chat.id] = app
 		return {"sessionId": chat.id, "configOptions": self._config_options(app)}
@@ -259,7 +259,7 @@ class Server:
 		if chat is None or chat.id != session_id:
 			raise RpcError(NOT_FOUND, f"Failed to find session {session_id}", {"sessionId": session_id})
 		app = App(argparse.Namespace(**vars(self.args)), AcpUI(self))
-		app.open_chat(chat)
+		app.open_chat(chat, load=False)
 		app.ui.session_id = session_id
 		self.apps[session_id] = app
 		return app
@@ -278,9 +278,10 @@ class Server:
 			if number <= self.cancelled.get(session_id, 0):
 				return {"stopReason": "cancelled"}
 			self.running, self.interrupted = (session_id, number), False
-		app.ui.in_turn = True
 		try:
 			try:
+				app.ensure_model()
+				app.ui.in_turn = True
 				if text.strip() == "/compact":
 					app.agent.maybe_compact(force=True)
 				else:
@@ -302,7 +303,7 @@ class Server:
 			raise RpcError(INVALID_PARAMS, f"Failed to set model {value}: llm-server does not list it")
 		previous, app.args.model = app.args.model, value
 		try:
-			app.open_chat(app.agent.chat)
+			app.open_chat(app.agent.chat, load=False)
 		except BaseException:
 			app.args.model = previous
 			raise
@@ -317,6 +318,8 @@ class Server:
 			"currentValue": app.settings.model, "options": [{"value": n, "name": n} for n in names]}]
 
 	def _report_usage(self, app: App) -> None:
+		if not app.agent.context_length:
+			return  # the model loads at the first prompt
 		app.ui.update("usage_update", used=app.agent.estimate_tokens(), size=app.agent.context_length)
 
 

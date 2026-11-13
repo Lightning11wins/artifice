@@ -1301,9 +1301,12 @@ class AcpTest(TempDataTest):
 			self.assertEqual(options["result"]["configOptions"][0]["currentValue"], "other")
 			bad = client.request("session/set_config_option", {"sessionId": session, "configId": "model", "value": "gone"})
 			self.assertEqual(bad["error"]["code"], -32602)
+			self.assertEqual(self.client.loaded, [])  # llm-server holds one model, so only the chosen one loads
+			client.request("session/prompt", {"sessionId": session, "prompt": [{"type": "text", "text": "hi"}]})
 
-		self.serve(script)
-		self.assertEqual(self.client.loaded, ["m", "other"])
+		received = self.serve(script)
+		self.assertEqual(self.client.loaded, ["other"])
+		self.assertEqual(self.updates(received, "usage_update")[-1]["size"], 1000)
 
 	def test_bad_requests_fail_alone(self):
 		def script(client):
