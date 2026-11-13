@@ -1,0 +1,42 @@
+#!/bin/bash
+# Installs Artifice's sandbox launcher where only root can change it, and lets you run it with sudo and no password.
+# Run it again after updating Artifice; Artifice refuses to start while the installed copy differs from its own.
+set -euo pipefail
+
+src=$(cd -- "$(dirname -- "$(realpath -- "$0")")/../artifice" && pwd)
+dir=/usr/local/libexec/artifice
+user=$(id -un)
+
+if [ "$(id -u)" = 0 ]; then
+	echo "Failed to install: run this as the user who runs Artifice, not root." >&2
+	exit 1
+fi
+if [ ! -x /usr/bin/python3 ]; then
+	echo "Failed to install: the launcher runs with /usr/bin/python3, which is missing." >&2
+	exit 1
+fi
+# Whoever can write to the launcher or a directory above it can run anything as root.
+for d in / /usr /usr/local /usr/local/libexec; do
+	[ -e "$d" ] || continue
+	read -r owner mode < <(stat -c '%u %a' -- "$d")
+	if [ ! -d "$d" ] || [ -L "$d" ] || [ "$owner" != 0 ] || (( 8#$mode & 8#022 )); then
+		echo "Failed to install: $d must be a directory owned by root that only root can write to ($(stat -c '%U %A' -- "$d"))." >&2
+		exit 1
+	fi
+done
+
+rule=$(mktemp)
+trap 'rm -f -- "$rule"' EXIT
+# The empty "" allows the launcher only without arguments.
+printf '%s ALL=(root) NOPASSWD: %s/launcher.py ""\n' "$user" "$dir" > "$rule"
+
+sudo install -d -o root -g root -m 755 "$dir"
+sudo install -o root -g root -m 755 "$src/launcher.py" "$dir/launcher.py"
+sudo install -o root -g root -m 644 "$src/confine.py" "$dir/confine.py"
+sudo visudo -cqf "$rule"
+sudo install -o root -g root -m 440 "$rule" /etc/sudoers.d/artifice
+if ! sudo -n -l "$dir/launcher.py" > /dev/null; then
+	echo "Failed to install: sudo still asks for a password to run $dir/launcher.py. Check /etc/sudoers.d/artifice." >&2
+	exit 1
+fi
+echo "Installed $dir and /etc/sudoers.d/artifice."

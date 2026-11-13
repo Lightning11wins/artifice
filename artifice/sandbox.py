@@ -1,6 +1,6 @@
 """Runs tool commands inside a bwrap sandbox built from a permission profile.
 
-bwrap runs as root through sudo, so it can grant CAP_DAC_READ_SEARCH in the host user namespace.
+launcher.py starts bwrap as root through sudo, so it can grant CAP_DAC_READ_SEARCH in the host user namespace.
 setpriv then drops to the user's uid keeping only that capability, and confine.py adds Landlock and seccomp.
 """
 import errno
@@ -20,11 +20,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-CONFINE = str(Path(__file__).with_name("confine.py"))
+from .launcher import systemd_running
+
+SOURCE = Path(__file__).parent
+INSTALL = SOURCE.parent / "bin" / "install-sandbox"
+LAUNCHER = "/usr/local/libexec/artifice/launcher.py"  # installed by INSTALL, with a copy of confine.py beside it
 SCRATCH_MAX_AGE = 48 * 3600
 DEADLINE_GRACE = 10  # seconds past its timeout that a command survives Artifice being killed
-SUDO_NOTICE = ("Artifice starts the model's sandbox with sudo so the model can read every file on this computer. "
-	"The sandbox drops to your user with only read access before running anything.")
 
 
 @dataclass(frozen=True)
@@ -64,12 +66,8 @@ class Sandbox:
 		self.scratch = scratch
 		self.cwd = cwd
 		self.notify = notify or (lambda text: print(text, file=sys.stderr))
-		self.bwrap = shutil.which("bwrap") or "bwrap"
-		self.setpriv = shutil.which("setpriv") or "setpriv"
-		self.unshare = shutil.which("unshare") or "unshare"
-		self.timeout = shutil.which("timeout") or "timeout"
-		self._systemd = shutil.which("systemd-run") is not None and os.path.isdir("/run/systemd/system")
-		self._passwordless = False
+		self.launcher = LAUNCHER
+		self._systemd = systemd_running()
 		self._lock = self._lock_scratch(exclusive)
 		self.close = weakref.finalize(self, os.close, self._lock)  # releases the lock early; dropping the sandbox does too
 
@@ -105,107 +103,28 @@ class Sandbox:
 			os.close(fd)  # clean_scratch removed it before the lock was taken
 		raise SandboxError(f"Failed to lock scratch directory {self.scratch}")
 
-	def command(self, deadline: int) -> list[str]:
-		"""The sandbox command line. The command to run goes on stdin, which keeps it out of sudo's logs."""
+	def request(self, argv: list[str], deadline: int) -> dict:
+		"""The launcher's request to run argv, killing it after deadline seconds even if Artifice was killed."""
 		home = os.path.expanduser("~")
-		env = {
-			"PATH": "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin",
-			"HOME": home,
-			"USER": os.environ.get("USER", ""),
-			"LANG": os.environ.get("LANG", "C.UTF-8"),
-			"TERM": "dumb",
-			"NO_COLOR": "1",
-			"PAGER": "cat",
-			"GIT_PAGER": "cat",
-			"GIT_OPTIONAL_LOCKS": "0",
-			"TMPDIR": "/tmp",
-			"XDG_CACHE_HOME": "/tmp/.cache",
-			"PYTHONDONTWRITEBYTECODE": "1",
+		return {
+			"argv": argv,
+			"deadline": deadline,
+			"scratch": str(self.scratch),
+			"cwd": self.cwd if os.path.isdir(self.cwd) and not hidden_in_sandbox(self.cwd) else home,
+			"lang": os.environ.get("LANG", "C.UTF-8"),
+			"memory_max": self.profile.memory_max,
+			"tasks_max": self.profile.tasks_max,
+			"file_size_max": self.profile.file_size_max,
+			"shm_max": self.profile.shm_max,
 		}
-		# timeout runs as root outside the sandbox, so it ends the sandbox even if Artifice was killed.
-		# It dies with its parent, sudo or, under use_pty, sudo's monitor process, which kills it when sudo dies.
-		# bwrap dies with it through --die-with-parent.
-		# The second setpriv makes the rest of the chain die with timeout, before bwrap's --die-with-parent applies.
-		cmd = ["sudo", "-n", self.setpriv, "--pdeathsig", "KILL", self.timeout, "--foreground", "-s", "KILL", str(deadline),
-			self.setpriv, "--pdeathsig", "KILL"]
-		if self._systemd:
-			# A system scope, because sudo's PAM session can move it out of a user scope.
-			cmd += [
-				"systemd-run", "--scope", "--quiet", "--collect",
-				"-p", f"MemoryMax={self.profile.memory_max}",
-				"-p", "MemorySwapMax=0",
-				"-p", f"TasksMax={self.profile.tasks_max}",
-			]
-		cmd += [
-			self.bwrap,
-			"--ro-bind", "/", "/",
-			"--dev", "/dev",
-			# Writable shared memory, for multiprocessing and POSIX semaphores.
-			"--perms", "1777", "--size", str(self.profile.shm_max), "--tmpfs", "/dev/shm",
-			# The host's /proc shows every process, but PIDs given to kill or ptrace resolve in the new PID namespace.
-			"--ro-bind", "/proc", "/proc",
-			"--bind", str(self.scratch), "/tmp",
-			"--unshare-pid", "--unshare-net", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try",
-			"--die-with-parent",
-			"--new-session",
-			"--clearenv",
-		]
-		for key, value in env.items():
-			cmd += ["--setenv", key, value]
-		for cap in ("CAP_DAC_READ_SEARCH", "CAP_SETUID", "CAP_SETGID", "CAP_SETPCAP", "CAP_SYS_ADMIN"):
-			cmd += ["--cap-add", cap]
-		cwd = self.cwd if os.path.isdir(self.cwd) and not hidden_in_sandbox(self.cwd) else home
-		groups = os.getgroups()
-		# bwrap's mounts receive the host's new mounts, without the read-only flag. A private mount namespace does not.
-		cmd += ["--chdir", "/", "--", self.unshare, "--mount", "--propagation", "private", "--"]
-		cmd += [
-			self.setpriv, f"--reuid={os.getuid()}", f"--regid={os.getgid()}",
-			f"--groups={','.join(map(str, groups))}" if groups else "--clear-groups",
-			"--inh-caps=-all,+dac_read_search",
-			"--ambient-caps=-all,+dac_read_search",
-			"--bounding-set=-all,+dac_read_search",
-			"--",
-		]
-		# confine.py enters cwd as the user, who can enter FUSE mounts that root cannot.
-		cmd += [sys.executable, "-I", "-S", CONFINE, "--chdir", cwd, "--write", "/tmp", "--write", "/dev"]
-		cmd += ["--fsize", str(self.profile.file_size_max), "--argv-stdin"]
-		return cmd
-
-	def ensure_sudo(self) -> None:
-		"""Makes sure sudo runs without a password, asking for it on the terminal if needed."""
-		if self._passwordless:
-			return
-		if _quiet(["sudo", "-n", "-v"]):
-			return
-		if self._sudo_runs_sandbox():
-			self._passwordless = True
-			return
-		if not sys.stdin.isatty():
-			raise SandboxError("Failed to use sudo: it needs a password and there is no terminal. Run `sudo -v` first.")
-		self.notify(SUDO_NOTICE)
-		if subprocess.run(["sudo", "-v"]).returncode != 0:
-			raise SandboxError("Failed to authenticate with sudo.")
-
-	def _sudo_runs_sandbox(self) -> bool:
-		"""Whether sudo runs the sandbox command itself without a password, as a narrow NOPASSWD rule allows.
-
-		A sandbox that fails after sudo let it run still counts, so check() reports the real error.
-		"""
-		try:
-			r = subprocess.run(self.command(30), input=b'["true"]', capture_output=True, timeout=30)
-		except subprocess.TimeoutExpired:
-			return False
-		return r.returncode == 0 or not r.stderr.startswith(b"sudo:")
 
 	def run(self, argv: list[str], timeout: int | None = None) -> Result:
 		timeout = max(1, min(timeout or self.profile.timeout, self.profile.max_timeout))
-		self.ensure_sudo()
 		# Deleted files that the command keeps open use disk without showing in scratch, so free space is checked too.
 		allowance = self.profile.scratch_max - self.scratch_usage()[0]
 		free_at_start = self._disk_free()
-		# No new session: sudo finds its cached login through this terminal.
 		proc = subprocess.Popen(
-			self.command(deadline=timeout + DEADLINE_GRACE),
+			["sudo", "-n", self.launcher],
 			stdin=subprocess.PIPE,
 			stdout=subprocess.PIPE,
 			stderr=subprocess.STDOUT,
@@ -219,7 +138,7 @@ class Sandbox:
 		sel = selectors.DefaultSelector()
 		try:
 			try:
-				proc.stdin.write(json.dumps(argv).encode())
+				proc.stdin.write(json.dumps(self.request(argv, deadline=timeout + DEADLINE_GRACE)).encode())
 				proc.stdin.close()
 			except BrokenPipeError:
 				pass
@@ -266,7 +185,15 @@ class Sandbox:
 				("timeout", "coreutils"), ("sudo", "sudo")):
 			if not shutil.which(tool):
 				raise SandboxError(f"Failed to find {tool} (package: {package})")
-		for path in (sys.executable, CONFINE):
+		for name in ("launcher.py", "confine.py"):
+			installed, source = Path(self.launcher).with_name(name), SOURCE / name
+			try:
+				current = installed.read_bytes() == source.read_bytes()
+			except FileNotFoundError:
+				raise SandboxError(f"Failed to find {installed}. Run {INSTALL} to install the sandbox.") from None
+			if not current:
+				raise SandboxError(f"Failed to start sandbox: {installed} differs from {source}. Run {INSTALL} to update it.")
+		for path in (sys.executable, self.launcher):
 			if hidden_in_sandbox(path):
 				raise SandboxError(f"Failed to start sandbox: {path} is under /tmp or /dev, which the sandbox replaces")
 		if not self._systemd:
@@ -274,7 +201,9 @@ class Sandbox:
 		result = self.run(["true"], timeout=30)
 		if result.exit_code != 0:
 			hint = ""
-			if os.path.isdir("/sys/kernel/security/apparmor"):
+			if result.output.startswith("sudo:"):
+				hint = f" Run {INSTALL} to let sudo start the sandbox without a password."
+			elif os.path.isdir("/sys/kernel/security/apparmor"):
 				hint = (" If AppArmor confines bwrap or unshare (check `sudo aa-status | grep -E 'bwrap|unshare'`), "
 					"that profile may block it.")
 			raise SandboxError(f"Failed to start sandbox (exit {result.exit_code}): {result.output.strip()}{hint}")
@@ -323,10 +252,6 @@ class Sandbox:
 			for fd, _names in stack:
 				os.close(fd)
 		return size, entries, unreadable
-
-
-def _quiet(argv: list[str]) -> bool:
-	return subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True).returncode == 0
 
 
 def hidden_in_sandbox(path: str) -> bool:

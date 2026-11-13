@@ -23,10 +23,23 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import artifice.sandbox  # noqa: E402
-from artifice.sandbox import READ_ONLY, Profile, Sandbox, SandboxError, clean_scratch  # noqa: E402
+from artifice.sandbox import READ_ONLY, Profile, Result, Sandbox, SandboxError, clean_scratch  # noqa: E402
 
 # Host directory the sandbox can see but must not modify. Under $HOME, not /tmp, which the sandbox replaces.
 HOST_DIR = Path.home() / ".cache" / "artifice-tests"
+# The repo's launcher, which needs the sudo ticket from `sudo -v`, so tests need no reinstall.
+LAUNCHER = str(Path(__file__).resolve().parent.parent / "artifice" / "launcher.py")
+artifice.sandbox.LAUNCHER = LAUNCHER
+
+
+def launcher_copy(path_prefix: str = "", text: str | None = None) -> str:
+	"""A copy of the launcher with confine.py beside it, looking for tools in path_prefix's directories first."""
+	d = Path(tempfile.mkdtemp(dir=HOST_DIR))
+	text = text if text is not None else Path(LAUNCHER).read_text()
+	(d / "launcher.py").write_text(text.replace('PATH = "', f'PATH = "{path_prefix}', 1))
+	(d / "launcher.py").chmod(0o755)
+	shutil.copy(Path(LAUNCHER).with_name("confine.py"), d / "confine.py")
+	return str(d / "launcher.py")
 
 
 class SandboxEscapeTest(unittest.TestCase):
@@ -388,6 +401,8 @@ sys.path.insert(0, {str(root)!r})
 from pathlib import Path
 from artifice.cli import exit_on_sigterm
 from artifice.sandbox import READ_ONLY, Sandbox
+import artifice.sandbox
+artifice.sandbox.LAUNCHER = {LAUNCHER!r}
 exit_on_sigterm()
 Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(["sleep", "4279"], timeout=60)
 """
@@ -408,6 +423,8 @@ import sys
 sys.path.insert(0, {str(root)!r})
 from pathlib import Path
 from artifice.sandbox import READ_ONLY, Sandbox
+import artifice.sandbox
+artifice.sandbox.LAUNCHER = {LAUNCHER!r}
 # A deadline kept inside the sandbox could be stopped like this.
 Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(
 	["bash", "-c", "kill -STOP $PPID 2>/dev/null; exec sleep 4283"], timeout=2)
@@ -432,6 +449,8 @@ import os, sys
 sys.path.insert(0, {str(root)!r})
 from pathlib import Path
 from artifice.sandbox import READ_ONLY, Sandbox
+import artifice.sandbox
+artifice.sandbox.LAUNCHER = {LAUNCHER!r}
 Sandbox.scratch_full = lambda self: False  # so nothing delays the check below
 Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(["sleep", "4297"], timeout=1)
 left = []
@@ -458,6 +477,8 @@ import sys
 sys.path.insert(0, {str(root)!r})
 from pathlib import Path
 from artifice.sandbox import READ_ONLY, Sandbox
+import artifice.sandbox
+artifice.sandbox.LAUNCHER = {LAUNCHER!r}
 r = Sandbox(READ_ONLY, Path({str(self.scratch)!r}), {str(self.host)!r}).run(
 	["sh", "-c", "printf 'RAW%sTTY' - > /dev/tty && echo opened || echo refused"])
 print("result:", r.output.strip().splitlines()[-1])
@@ -470,11 +491,11 @@ print("result:", r.output.strip().splitlines()[-1])
 
 	def test_a_sandbox_interrupted_while_starting_does_not_outlive_it(self):
 		# bwrap starting late leaves a window before --die-with-parent applies.
-		wrapper = Path(tempfile.mkdtemp(dir=HOST_DIR)) / "slow-bwrap"
-		wrapper.write_text(f"#!/bin/sh\nsleep 2\nexec {self.sb.bwrap} \"$@\"\n")
+		wrapper = Path(tempfile.mkdtemp(dir=HOST_DIR)) / "bwrap"
+		wrapper.write_text(f"#!/bin/sh\nsleep 2\nexec {shutil.which('bwrap')} \"$@\"\n")
 		wrapper.chmod(0o755)
 		sb = Sandbox(READ_ONLY, self.scratch, str(self.host))
-		sb.bwrap = str(wrapper)
+		sb.launcher = launcher_copy(f"{wrapper.parent}:")
 		sb.run(["sleep", "4303"], timeout=1)
 		time.sleep(4)
 		left = subprocess.run(["pgrep", "-x", "-f", "sleep 4303"], capture_output=True, text=True).stdout.split()
@@ -536,17 +557,63 @@ print("result:", r.output.strip().splitlines()[-1])
 			with self.assertRaisesRegex(SandboxError, "under /tmp"):
 				self.sb.check()
 
-	def test_sudo_probe_runs_the_sandbox_command(self):
-		# A NOPASSWD rule must cover the whole sandbox command, not just bwrap.
+	def test_a_missing_or_stale_launcher_is_refused(self):
 		sb = Sandbox(READ_ONLY, self.scratch, str(self.host))
-		probe = Path(tempfile.mkdtemp(dir=HOST_DIR)) / "probed"
-		sb.command = lambda deadline: ["sh", "-c", f"touch {probe}; echo 'sudo: a password is required' >&2; exit 1"]
-		with mock.patch.object(artifice.sandbox, "_quiet", lambda argv: False), \
-				mock.patch.object(sys.stdin, "isatty", lambda: False):
-			with self.assertRaisesRegex(SandboxError, "needs a password"):
-				sb.ensure_sudo()
-		self.assertTrue(probe.exists())
-		self.assertFalse(sb._passwordless)
+		sb.launcher = str(HOST_DIR / "missing" / "launcher.py")
+		with self.assertRaisesRegex(SandboxError, "Failed to find .*install-sandbox"):
+			sb.check()
+		sb.launcher = launcher_copy(text=Path(LAUNCHER).read_text() + "\n")
+		with self.assertRaisesRegex(SandboxError, "launcher.py differs from .*install-sandbox"):
+			sb.check()
+		sb.launcher = launcher_copy()
+		Path(sb.launcher).with_name("confine.py").write_text("")
+		with self.assertRaisesRegex(SandboxError, "confine.py differs from .*install-sandbox"):
+			sb.check()
+
+	def test_a_sudo_password_prompt_says_to_install(self):
+		sb = Sandbox(READ_ONLY, self.scratch, str(self.host))
+		with mock.patch.object(sb, "run", return_value=Result("sudo: a password is required\n", 1)):
+			with self.assertRaisesRegex(SandboxError, "password is required.*install-sandbox"):
+				sb.check()
+
+	def test_launcher_rejects_bad_requests(self):
+		good = self.sb.request(["true"], deadline=30)
+		for change in ({"deadline": True}, {"deadline": 0}, {"tasks_max": "512"}, {"argv": []}, {"argv": [1]},
+				{"memory_max": "8G -p Delegate=yes"}, {"memory_max": "8G\nDelegate=yes"}, {"cwd": "/\0"}, {"extra": 1}):
+			with self.subTest(change=change):
+				r = subprocess.run(["sudo", "-n", LAUNCHER], input=json.dumps(good | change), capture_output=True, text=True)
+				self.assertEqual((r.returncode, r.stdout), (125, ""), r.stderr)
+				self.assertIn("Failed to parse request", r.stderr)
+		del good["lang"]
+		r = subprocess.run(["sudo", "-n", LAUNCHER], input=json.dumps(good), capture_output=True, text=True)
+		self.assertIn("Failed to parse request", r.stderr)
+		r = subprocess.run([LAUNCHER], input=json.dumps(good), capture_output=True, text=True)
+		self.assertIn("run this through sudo", r.stderr)
+
+	def test_launcher_refuses_a_scratch_only_root_can_reach(self):
+		# The scratch is writable in the sandbox, so a world-writable directory behind a root-only one must stay shut.
+		locked = HOST_DIR / f"locked-{os.getpid()}"
+		inner = locked / "inner"
+		subprocess.run(["sudo", "-n", "sh", "-c", f"mkdir -m 700 {locked} && mkdir -m 777 {inner}"], check=True)
+		self.addCleanup(subprocess.run, ["sudo", "-n", "rm", "-rf", str(locked)])
+		request = self.sb.request(["sh", "-c", "echo pwned > /tmp/f"], deadline=30) | {"scratch": str(inner)}
+		r = subprocess.run(["sudo", "-n", LAUNCHER], input=json.dumps(request), capture_output=True, text=True)
+		self.assertNotEqual(r.returncode, 0)
+		self.assertIn("Failed to open scratch directory", r.stderr)
+		self.assertNotEqual(subprocess.run(["sudo", "-n", "test", "-e", str(inner / "f")]).returncode, 0)
+
+	def test_the_command_inherits_only_stdio(self):
+		r = self.py("""
+import os
+fds = {}
+for fd in os.listdir("/proc/self/fd"):
+	try:
+		fds[fd] = os.readlink(f"/proc/self/fd/{fd}")
+	except FileNotFoundError:
+		pass  # the listing's own descriptor
+print(sorted(fds), fds)
+""")
+		self.assertTrue(r.output.startswith("['0', '1', '2'] "), r.output)
 
 	def test_preallocate_ioctls_are_refused(self):
 		# These ioctls call fallocate with KEEP_SIZE, which skips RLIMIT_FSIZE.
@@ -652,14 +719,6 @@ print(libc.msgget({key}, 0), ctypes.get_errno())
 		self.assertFalse(r.timed_out, r.output)
 		self.assertIsNone(r.exit_code, r.output)
 		self.assertTrue(r.scratch_full, r.output)
-
-	def test_sandbox_failure_after_sudo_is_not_a_password_error(self):
-		sb = Sandbox(READ_ONLY, self.scratch, str(self.host))
-		sb.unshare = "/nonexistent/unshare"
-		with mock.patch.object(artifice.sandbox, "_quiet", lambda argv: False), \
-				mock.patch.object(sys.stdin, "isatty", lambda: False):
-			with self.assertRaisesRegex(SandboxError, "Failed to start sandbox.*unshare"):
-				sb.check()
 
 	def test_cwd_under_host_tmp_or_dev(self):
 		for top in ("/tmp", "/dev/shm"):
