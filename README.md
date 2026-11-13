@@ -24,6 +24,10 @@ bin/install-sandbox
 
 It copies `artifice/launcher.py` and `artifice/confine.py` to `/usr/local/libexec/artifice/`, owned by root, and adds `/etc/sudoers.d/artifice`, which lets you run that launcher with sudo and no password. Artifice refuses to start while the installed copies differ from its own. See below for what this allows.
 
+### In T3 Code and other ACP clients
+
+`bin/artifice --acp` serves the [Agent Client Protocol](https://agentclientprotocol.com) on stdin and stdout. In T3 Code, add a Local ACP command with executable `/path/to/artifice/bin/artifice`, argument `--acp`, and `LLM_HOST` in Variables if the server is not local. Chats are saved as usual, so `-r` can resume them in the terminal. The client's model picker lists the server's models, and `/compact` works as in the terminal. Missing `bwrap` or `rg` fail the start, since there is no terminal to ask in.
+
 ## Tools
 
 | Tool | Runs |

@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from . import deps
-from .agent import Agent, Settings
+from .agent import UI, Agent, Settings
 from .client import LLMClient, LLMError
 from .prompt import system_prompt
 from .sandbox import READ_ONLY, Sandbox, SandboxError, clean_scratch, hidden_in_sandbox
@@ -134,7 +134,11 @@ def parse_args() -> argparse.Namespace:
 	p.add_argument("--max-tokens", type=_positive_int, default=16384, help="per-response limit, thinking included")
 	p.add_argument("--temperature", type=_positive, default=0.6, help="greater than 0")
 	p.add_argument("--top-p", type=_probability, default=0.95, help="greater than 0, at most 1")
-	return p.parse_args()
+	p.add_argument("--acp", action="store_true", help="serve the Agent Client Protocol on stdin and stdout, for clients like T3 Code")
+	args = p.parse_args()
+	if args.acp and (args.prompt is not None or args.resume or args.cont):
+		p.error("--acp opens chats as the client asks, so it takes no -p, -r, or -c")
+	return args
 
 
 COMMANDS = {"quit", "exit", "q", "help", "new", "chats", "resume", "compact", "think", "reasoning", "usage"}
@@ -196,7 +200,7 @@ def _input_waiting() -> bool:
 
 
 class App:
-	def __init__(self, args: argparse.Namespace):
+	def __init__(self, args: argparse.Namespace, ui: UI | None = None):
 		self.args = args
 		self.client = LLMClient(args.host, args.port)
 		self.settings = Settings(
@@ -207,7 +211,7 @@ class App:
 			thinking=None if args.think is None else args.think == "on",
 		)
 		one_shot = args.prompt is not None
-		self.ui = TerminalUI(answer_out=sys.stdout, trace_out=sys.stderr if one_shot else sys.stdout)
+		self.ui = ui or TerminalUI(answer_out=sys.stdout, trace_out=sys.stderr if one_shot else sys.stdout)
 		self.context_length = 0
 		self.loaded: str | None = None
 		self.agent: Agent | None = None
@@ -247,15 +251,19 @@ class App:
 		if current and current.tools.sandbox is not sandbox:
 			current.tools.sandbox.close()
 
-	def new_chat(self) -> Chat:
-		try:
-			cwd = os.getcwd()
-		except FileNotFoundError:
-			cwd = str(Path.home())
-			self.ui.notice(f"The current directory was deleted, so the chat starts in {cwd}.")
+	def new_chat(self, cwd: str | None = None) -> Chat:
+		"""A new chat in cwd, which defaults to the current directory."""
+		if cwd is None:
+			try:
+				cwd = os.getcwd()
+			except FileNotFoundError:
+				cwd = str(Path.home())
+				self.ui.notice(f"The current directory was deleted, so the chat starts in {cwd}.")
 		if hidden_in_sandbox(cwd):
 			self.ui.notice(f"The sandbox hides {cwd}, so the chat starts in {Path.home()} instead.")
 			cwd = str(Path.home())
+		elif not os.path.isdir(cwd):
+			raise FileNotFoundError(f"Failed to start a chat in {cwd}: it is not a directory")
 		chat = Chat.new(self.settings.model, READ_ONLY.name, cwd)
 		chat.messages.append({"role": "system", "content": system_prompt(cwd, READ_ONLY.name)})
 		return chat
@@ -386,6 +394,10 @@ def _main() -> None:
 	if not deps.ensure():
 		sys.exit("Failed to start: bwrap and rg are required.")
 	clean_scratch(scratch_root())
+	if args.acp:
+		from .acp import serve
+		serve(args)
+		return
 	app = App(args)
 	try:
 		if args.resume or args.cont:

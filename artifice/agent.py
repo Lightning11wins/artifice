@@ -172,7 +172,7 @@ class Agent:
 			if m["role"] == "system":
 				continue
 			content = m.get("content") or ""
-			order = 1 if i == last_user else 2 if _is_summary(m) else 0
+			order = 1 if i == last_user else 2 if is_summary(m) else 0
 			parts.append((order, _size(content) - _size(self._note(m, len(content))), i, "content", 0))
 			if i > last_user:
 				parts.append((0, _size(m.get("reasoning_content") or ""), i, "reasoning_content", 0))
@@ -348,7 +348,7 @@ class Agent:
 			last_user = max((i for i, m in enumerate(self.messages) if m["role"] == "user"), default=0)
 		else:
 			last_user = len(self.messages)
-		if all(m["role"] == "system" or _is_summary(m) for m in self.messages[:last_user]):
+		if all(m["role"] == "system" or is_summary(m) for m in self.messages[:last_user]):
 			if not keep_current:
 				self.ui.notice("Nothing to summarize.")
 			return False
@@ -376,7 +376,7 @@ class Agent:
 		return True
 
 
-def _is_summary(m: dict) -> bool:
+def is_summary(m: dict) -> bool:
 	return m["role"] == "user" and (m.get("content") or "").startswith("[Compacted context]")
 
 

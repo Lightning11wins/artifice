@@ -12,13 +12,14 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from artifice import cli, deps, helpers, tools  # noqa: E402
+from artifice import acp, cli, deps, helpers, tools  # noqa: E402
 from artifice.agent import Agent, Settings  # noqa: E402
 from artifice.client import LLMError  # noqa: E402
 from artifice.sandbox import READ_ONLY, Result, Sandbox, SandboxError  # noqa: E402
@@ -915,7 +916,7 @@ class CommandTest(TempDataTest):
 		self.assertEqual(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
 
 	def test_broken_pipe_in_one_shot_mode_reaches_main(self):
-		args = argparse.Namespace(prompt="x", resume=None, cont=False)
+		args = argparse.Namespace(prompt="x", resume=None, cont=False, acp=False)
 		app = mock.Mock()
 		app.agent.send.side_effect = BrokenPipeError()
 		with mock.patch.object(cli, "parse_args", return_value=args), \
@@ -1150,6 +1151,206 @@ class MainTest(unittest.TestCase):
 			cli.main()
 
 
+class AcpClient(FakeClient):
+	def __init__(self, calls: int = 0, block: bool = False):
+		super().__init__(calls)
+		self.block = block
+		self.loaded: list[str] = []
+
+	def list(self):
+		return [{"name": "m", "loaded": True, "context_length": 1000}, {"name": "other", "loaded": False}]
+
+	def load(self, model, ttl):
+		self.loaded.append(model)
+		return super().load(model, ttl)
+
+	def stream(self, body):
+		if self.block:
+			yield {"token": "working"}
+			while True:
+				time.sleep(1)  # until cancelled
+		yield from super().stream(body)
+
+
+class AcpTest(TempDataTest):
+	CWD = str(Path(__file__).resolve().parent)
+
+	def setUp(self):
+		super().setUp()
+		self.client = AcpClient()
+		self.tools = FakeTools("out")
+		for name, value in (("LLMClient", lambda host, port: self.client), ("Sandbox", mock.Mock()),
+				("Tools", lambda sandbox: self.tools)):
+			patcher = mock.patch.object(cli, name, value)
+			patcher.start()
+			self.addCleanup(patcher.stop)
+		self.tools.sandbox = mock.Mock()
+		self.addCleanup(signal.signal, signal.SIGUSR1, signal.getsignal(signal.SIGUSR1))
+		self.args = argparse.Namespace(host="h", port=1, model="m", max_tokens=100, temperature=0.6, top_p=0.95,
+			think=None, prompt=None, resume=None, cont=False, acp=True)
+
+	def serve(self, script) -> list[dict]:
+		"""Serves on this thread while script(client) plays the client on another. Returns all the server sent."""
+		in_r, in_w = os.pipe()
+		out_r, out_w = os.pipe()
+		stdin, stdout = os.fdopen(in_r, "rb"), os.fdopen(out_w, "w")
+		client = AcpPeer(os.fdopen(in_w, "w"), os.fdopen(out_r))
+		failure = []
+
+		def play():
+			try:
+				script(client)
+			except BaseException as e:
+				failure.append(e)
+			finally:
+				client.writer.close()
+
+		thread = threading.Thread(target=play)
+		thread.start()
+		try:
+			acp.Server(self.args, stdin, stdout).serve()
+		finally:
+			stdout.close()  # ends a script waiting on a server that failed
+			thread.join()
+			stdin.close()
+		client.drain()
+		if failure:
+			raise failure[0]
+		return client.received
+
+	def start(self, client) -> str:
+		client.request("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
+		return client.request("session/new", {"cwd": self.CWD, "mcpServers": []})["result"]["sessionId"]
+
+	def updates(self, received: list[dict], kind: str) -> list[dict]:
+		return [m["params"]["update"] for m in received
+			if m.get("method") == "session/update" and m["params"]["update"]["sessionUpdate"] == kind]
+
+	def test_a_prompt_streams_the_answer(self):
+		def script(client):
+			session = self.start(client)
+			response = client.request("session/prompt", {"sessionId": session, "prompt": [{"type": "text", "text": "hi"}]})
+			self.assertEqual(response["result"], {"stopReason": "end_turn"})
+
+		received = self.serve(script)
+		self.assertTrue(all(m["jsonrpc"] == "2.0" for m in received))
+		self.assertEqual([u["content"]["text"] for u in self.updates(received, "agent_message_chunk")], ["done"])
+		self.assertEqual(self.updates(received, "available_commands_update")[0]["availableCommands"][0]["name"], "compact")
+		self.assertEqual(self.updates(received, "usage_update")[-1]["size"], 1000)
+		chat = Chat.load(received[1]["result"]["sessionId"])
+		self.assertEqual((chat.cwd, chat.messages[-2]["content"]), (self.CWD, "hi"))
+
+	def test_requests_before_initialize_are_refused(self):
+		def script(client):
+			response = client.request("session/new", {"cwd": self.CWD, "mcpServers": []})
+			self.assertEqual(response["error"]["code"], -32600)
+
+		self.serve(script)
+
+	def test_tool_calls_are_reported(self):
+		self.client.calls = 1
+
+		def script(client):
+			session = self.start(client)
+			client.request("session/prompt", {"sessionId": session, "prompt": [{"type": "text", "text": "hi"}]})
+
+		received = self.serve(script)
+		[call] = self.updates(received, "tool_call")
+		[result] = self.updates(received, "tool_call_update")
+		self.assertEqual((call["kind"], call["status"], call["rawInput"]), ("execute", "in_progress", {"command": "x"}))
+		self.assertEqual((result["toolCallId"], result["status"]), (call["toolCallId"], "completed"))
+		self.assertIn("out", result["content"][0]["content"]["text"])
+
+	def test_cancel_stops_the_running_and_queued_prompts(self):
+		self.client.block = True
+
+		def script(client):
+			session = self.start(client)
+			prompt = {"sessionId": session, "prompt": [{"type": "text", "text": "hi"}]}
+			first, second = client.send("session/prompt", prompt), client.send("session/prompt", prompt)
+			client.until(lambda m: m.get("params", {}).get("update", {}).get("content", {}).get("text") == "working")
+			client.notify("session/cancel", {"sessionId": session})
+			self.assertEqual(client.response(first)["result"], {"stopReason": "cancelled"})
+			self.assertEqual(client.response(second)["result"], {"stopReason": "cancelled"})
+
+		self.serve(script)
+
+	def test_load_replays_the_chat(self):
+		chat = self.chat(("user", "hi"))
+		call = {"id": "c0", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "a"}'}}
+		chat.messages += [{"role": "assistant", "content": "", "reasoning_content": "hmm", "tool_calls": [call]},
+			{"role": "tool", "tool_call_id": "c0", "content": "text"}, {"role": "assistant", "content": "answer"}]
+		chat.save()
+
+		def script(client):
+			client.request("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
+			self.assertIn("result", client.request("session/load", {"sessionId": chat.id, "cwd": "/", "mcpServers": []}))
+			missing = client.request("session/load", {"sessionId": chat.id[:4], "cwd": "/", "mcpServers": []})
+			self.assertEqual(missing["error"]["code"], -32002)
+
+		received = self.serve(script)
+		kinds = [m["params"]["update"]["sessionUpdate"] for m in received if m.get("method") == "session/update"]
+		self.assertEqual(kinds[:5], ["user_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update",
+			"agent_message_chunk"])
+		self.assertEqual(self.updates(received, "tool_call")[0]["kind"], "read")
+
+	def test_the_model_option_switches_models(self):
+		def script(client):
+			session = self.start(client)
+			options = client.request("session/set_config_option", {"sessionId": session, "configId": "model", "value": "other"})
+			self.assertEqual(options["result"]["configOptions"][0]["currentValue"], "other")
+			bad = client.request("session/set_config_option", {"sessionId": session, "configId": "model", "value": "gone"})
+			self.assertEqual(bad["error"]["code"], -32602)
+
+		self.serve(script)
+		self.assertEqual(self.client.loaded, ["m", "other"])
+
+	def test_stdout_carries_only_the_protocol(self):
+		code = ("import sys; sys.path.insert(0, sys.argv[1]); from artifice import acp; "
+			"acp.Server.serve = lambda self: (print('stray'), self.notify('x', {})); acp.serve(None)")
+		r = subprocess.run([sys.executable, "-c", code, str(Path(__file__).resolve().parent.parent)],
+			capture_output=True, text=True, stdin=subprocess.DEVNULL)
+		self.assertEqual((r.stdout, r.stderr), ('{"jsonrpc": "2.0", "method": "x", "params": {}}\n', "stray\n"))
+
+
+class AcpPeer:
+	"""The client end of an ACP connection."""
+
+	def __init__(self, writer, reader):
+		self.writer = writer
+		self.reader = reader
+		self.received: list[dict] = []
+		self.next_id = 0
+
+	def notify(self, method: str, params: dict) -> None:
+		self.writer.write(json.dumps({"jsonrpc": "2.0", "method": method, "params": params}) + "\n")
+		self.writer.flush()
+
+	def send(self, method: str, params: dict) -> int:
+		self.next_id += 1
+		self.writer.write(json.dumps({"jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params}) + "\n")
+		self.writer.flush()
+		return self.next_id
+
+	def request(self, method: str, params: dict) -> dict:
+		return self.response(self.send(method, params))
+
+	def response(self, request_id: int) -> dict:
+		return next((m for m in self.received if m.get("id") == request_id and "method" not in m), None) \
+			or self.until(lambda m: m.get("id") == request_id and "method" not in m)
+
+	def until(self, done) -> dict:
+		while line := self.reader.readline():
+			self.received.append(message := json.loads(line))
+			if done(message):
+				return message
+		raise AssertionError("the server closed its output first")
+
+	def drain(self) -> None:
+		self.received += [json.loads(line) for line in self.reader]
+		self.reader.close()
+
+
 class ClientTest(unittest.TestCase):
 	def stream(self, *lines: str, body: dict | None = None) -> list[dict]:
 		import http.server
@@ -1307,7 +1508,7 @@ class TerminalUITest(unittest.TestCase):
 		self.assertEqual((answer.getvalue() + trace.getvalue()).count("\\x1b[2J"), 4)
 
 	def test_one_shot_errors_are_escaped(self):
-		args = argparse.Namespace(prompt="x", resume=None, cont=False)
+		args = argparse.Namespace(prompt="x", resume=None, cont=False, acp=False)
 		error = LLMError("Failed to parse \x1b]52;c;cHduZWQ=\x07")
 		for failing in ("open_chat", "agent.send"):
 			with self.subTest(failing=failing):
