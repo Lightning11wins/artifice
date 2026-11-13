@@ -224,8 +224,10 @@ class App:
 			self.ui.notice(f"The server did not report a context length. Assuming {FALLBACK_CONTEXT:,} tokens.")
 		return context_length or FALLBACK_CONTEXT
 
-	def open_chat(self, chat: Chat) -> None:
-		"""Switches to chat. On failure, the current chat and its settings are unchanged."""
+	def open_chat(self, chat: Chat, load: bool = True) -> None:
+		"""Switches to chat. On failure, the current chat and its settings are unchanged.
+
+		Without load, the model loads at the next ensure_model, and the agent's context length is 0 until then."""
 		model = self.args.model or chat.model
 		current = self.agent
 		cwd = chat.cwd
@@ -235,9 +237,11 @@ class App:
 			if not os.path.isdir(cwd):
 				cwd = str(Path.home())
 			sandbox = Sandbox(READ_ONLY, scratch_root() / chat.id, cwd, notify=self.ui.notice, exclusive=True)
-		context_length = self.context_length if model == self.loaded else self.load_model(model)
+		loaded = load or model == self.loaded
+		context_length = self.context_length if model == self.loaded else self.load_model(model) if load else 0
 		sandbox.check()
-		self.loaded, self.context_length = model, context_length
+		if loaded:
+			self.loaded, self.context_length = model, context_length
 		if model != chat.model:  # another tokenizer
 			chat.usage_tokens, chat.bytes_per_token = None, None
 		self.settings.model = chat.model = model
@@ -247,9 +251,16 @@ class App:
 			if chat.messages and chat.messages[0]["role"] == "system":
 				chat.messages[0] = {"role": "system", "content": system_prompt(cwd, chat.profile)}
 				chat.usage_tokens = None
-		self.agent = Agent(self.client, chat, Tools(sandbox), self.settings, self.ui, self.context_length)
+		self.agent = Agent(self.client, chat, Tools(sandbox), self.settings, self.ui, context_length)
 		if current and current.tools.sandbox is not sandbox:
 			current.tools.sandbox.close()
+
+	def ensure_model(self) -> None:
+		"""Loads the open chat's model if open_chat did not."""
+		model = self.settings.model
+		if model != self.loaded:
+			self.context_length = self.agent.context_length = self.load_model(model)
+			self.loaded = model
 
 	def new_chat(self, cwd: str | None = None) -> Chat:
 		"""A new chat in cwd, which defaults to the current directory."""
